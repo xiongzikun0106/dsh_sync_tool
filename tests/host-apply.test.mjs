@@ -23,6 +23,7 @@ test('config resolves the documented defaults', () => {
     enabled: true,
     syncOnTurnEnd: true,
     syncOnStartup: false,
+    syncAllOnTurnEnd: false,
     debounceMs: 5000,
     commitMessageTemplate: 'dsh-sync: {host} {time} (turn {turn})',
     historyLimit: 20,
@@ -79,9 +80,15 @@ function stubContext() {
   const sections = []
   const registered = []
   const disposers = []
+  const listeners = new Map()
 
   const ctx = {
     get: () => undefined,
+    on(event, handler) {
+      if (!listeners.has(event)) listeners.set(event, [])
+      listeners.get(event).push(handler)
+      return () => {}
+    },
     effect(callback, _name) {
       const result = callback()
       if (result !== undefined && typeof result.next === 'function') {
@@ -115,16 +122,19 @@ function stubContext() {
     },
   }
 
-  return { ctx, injected, sections, registered, disposers }
+  return { ctx, injected, sections, registered, disposers, listeners }
 }
 
 test('apply registers the config section and the status namespace', () => {
-  const { ctx, injected, sections, registered, disposers } = stubContext()
+  const { ctx, injected, sections, registered, disposers, listeners } = stubContext()
 
   const entry = Config({})
   apply(ctx, entry)
 
   assert.deepEqual(injected, [['settings']], 'the settings service is read optionally, via ctx.inject')
+
+  assert.ok(listeners.has('session/event'), 'the turn-boundary hook is registered on the fiber')
+  assert.equal(listeners.get('session/event').length, 1)
 
   assert.equal(sections.length, 1)
   const [section] = sections

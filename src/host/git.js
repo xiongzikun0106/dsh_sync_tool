@@ -74,6 +74,14 @@ export function normalizePath(value) {
   return process.platform === 'win32' ? unified.toLowerCase() : unified
 }
 
+/** Whether `child` is `parent` or sits beneath it. */
+export function pathContains(parent, child) {
+  const base = normalizePath(parent)
+  const target = normalizePath(child)
+  if (base === '' || target === '') return false
+  return target === base || target.startsWith(`${base}/`)
+}
+
 /** Extract the path from one `git status --porcelain` line. */
 export function porcelainPath(line) {
   const body = String(line).slice(3).trim()

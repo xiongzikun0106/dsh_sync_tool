@@ -20,7 +20,7 @@ import { isAbsolute } from 'node:path'
 
 import z from '@deepseek-ai/schemastery'
 
-import { buildCommitMessage, GitEngine } from './git.js'
+import { buildCommitMessage, GitEngine, pathContains } from './git.js'
 
 /** Cordis plugin name (the loader row's `name` is the module specifier). */
 export const name = 'sync-tool'
@@ -83,6 +83,11 @@ export const Config = z.object({
   syncOnTurnEnd: z.boolean().default(true),
   /** Run one pass over every enabled area when the Host starts. */
   syncOnStartup: z.boolean().default(false),
+  /**
+   * Sync every enabled area at a turn boundary instead of only those whose
+   * folder contains the session's working directory.
+   */
+  syncAllOnTurnEnd: z.boolean().default(false),
   /** Coalescing window for bursty turn boundaries, in milliseconds. */
   debounceMs: z.natural().default(5000),
   /** Commit message template; `{host}`, `{time}` and `{turn}` are substituted. */
@@ -202,7 +207,9 @@ export function apply(ctx, config) {
       if (problem !== undefined) {
         return { id: area.id, status: 'error', at: Date.now(), detail: problem, head: '', ahead: 0, behind: 0 }
       }
-      return observed ?? { id: area.id, status: 'idle', at: 0, detail: '', head: '', ahead: 0, behind: 0 }
+      // `id` is restated last: an observed entry must never lose the field the
+      // status schema requires, or the whole document would be rejected.
+      return { ...(observed ?? { status: 'idle', at: 0, detail: '', head: '', ahead: 0, behind: 0 }), id: area.id }
     })
 
     runtime.revision += 1
@@ -234,8 +241,15 @@ export function apply(ctx, config) {
   /** Run one sync pass over the selected areas, publishing as it goes. */
   const runPass = async (options = {}) => {
     const current = resolveConfig() ?? {}
-    const selected = configuredAreas().filter(area => area.enabled !== false
-      && (options.areaId === undefined || options.areaId === '' || area.id === options.areaId))
+    const wanted = Array.isArray(options.areaIds) && options.areaIds.length > 0
+      ? new Set(options.areaIds)
+      : undefined
+    const selected = configuredAreas().filter((area) => {
+      if (area.enabled === false) return false
+      if (wanted !== undefined) return wanted.has(area.id)
+      if (typeof options.areaId === 'string' && options.areaId !== '') return area.id === options.areaId
+      return true
+    })
 
     runtime.running = true
     publish()
@@ -244,11 +258,11 @@ export function apply(ctx, config) {
         if (runtime.disposed) return
         const problem = folderProblem(area.path)
         if (problem !== undefined) {
-          runtime.areas.set(area.id, { status: 'error', at: Date.now(), detail: problem, head: '', ahead: 0, behind: 0 })
+          runtime.areas.set(area.id, { id: area.id, status: 'error', at: Date.now(), detail: problem, head: '', ahead: 0, behind: 0 })
           publish()
           continue
         }
-        runtime.areas.set(area.id, { status: 'syncing', at: Date.now(), detail: '同步中…', head: '', ahead: 0, behind: 0 })
+        runtime.areas.set(area.id, { id: area.id, status: 'syncing', at: Date.now(), detail: '同步中…', head: '', ahead: 0, behind: 0 })
         publish()
 
         const credential = await resolveCredential(area.credentialRef)
@@ -263,6 +277,7 @@ export function apply(ctx, config) {
           })
         } catch (error) {
           result = {
+            id: area.id,
             status: 'error',
             detail: `同步失败：${error instanceof Error ? error.message : String(error)}`,
             head: '',
@@ -271,7 +286,7 @@ export function apply(ctx, config) {
           }
         }
 
-        const value = { ...result, at: Date.now() }
+        const value = { ...result, id: area.id, at: Date.now() }
         runtime.areas.set(area.id, value)
         const name = area.name !== undefined && area.name !== '' ? area.name : area.path
         runtime.history.push({
@@ -295,11 +310,70 @@ export function apply(ctx, config) {
     return next
   }
 
+  /**
+   * Turn-boundary coalescing: bursty or nested turns inside one window collapse
+   * into a single queued pass.
+   */
+  const pending = { areas: new Set(), all: false, turn: 0, timer: undefined }
+
+  const flushPending = () => {
+    pending.timer = undefined
+    const ids = [...pending.areas]
+    const { all, turn } = pending
+    pending.areas.clear()
+    pending.all = false
+    if (all) enqueuePass({ turn })
+    else if (ids.length > 0) enqueuePass({ turn, areaIds: ids })
+  }
+
+  /**
+   * Decide what a finished turn should sync: the areas whose folder contains the
+   * session's working directory, or every area when the user asked for that.
+   * @param session - the session the turn belonged to.
+   * @param event - the `turn/end` payload.
+   */
+  const scheduleTurnSync = (session, event) => {
+    const current = resolveConfig() ?? {}
+    if (current.enabled === false || current.syncOnTurnEnd === false) return
+    const areas = configuredAreas().filter(area => area.enabled !== false)
+    if (areas.length === 0) return
+
+    const cwd = session !== undefined && session.header !== undefined ? session.header.cwd : undefined
+    const matched = typeof cwd === 'string' ? areas.filter(area => pathContains(area.path, cwd)) : []
+    if (matched.length === 0) {
+      if (current.syncAllOnTurnEnd !== true) return
+      pending.all = true
+    } else {
+      for (const area of matched) pending.areas.add(area.id)
+    }
+    pending.turn = Number.isFinite(event?.data?.turn) ? event.data.turn : 0
+
+    const delay = Number.isFinite(current.debounceMs) ? Math.max(0, current.debounceMs) : 5000
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
+    pending.timer = setTimeout(flushPending, delay)
+  }
+
+  // Turn boundaries are durable session events; `session/event` listeners are
+  // post-commit and fire-and-forget, so a slow or failing sync can never delay
+  // or break the conversation.
+  ctx.on('session/event', (session, event) => {
+    if (event === undefined || event.type !== 'turn/end') return
+    try {
+      scheduleTurnSync(session, event)
+    } catch (error) {
+      warn(`turn scheduling failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+
   ctx.effect(function* () {
     // Keep the fiber alive across an in-flight pass, and stop accepting new work
     // the moment this plugin unloads.
     yield async () => {
       runtime.disposed = true
+      if (pending.timer !== undefined) {
+        clearTimeout(pending.timer)
+        pending.timer = undefined
+      }
       await queue
     }
   }, 'sync-tool: pass drain')

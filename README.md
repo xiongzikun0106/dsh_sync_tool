@@ -18,21 +18,37 @@
 | P0 | 包骨架 + bundle 行 + 客户端卡片 + 构建 + 安装验证 | ✅ 完成 |
 | P1 | settings 命名空间 + 工作区域 CRUD + 目录选择 + 宿主状态发布 | ✅ 完成 |
 | P2 | git 引擎（`ctx.subprocess`）+ 手动同步 + 状态与历史 | ✅ 完成 |
-| P3 | `turn/end` 自动同步 + 防抖单飞队列 + 冲突停靠 | ⏳ |
+| P3 | `turn/end` 自动同步 + 防抖单飞队列 + 冲突停靠 | ✅ 完成 |
 | P4 | 跨机验证 + 便携清单 `.dsh-sync.yml` + 最终文档 | ⏳ |
 
 ## 测试
 
 ```sh
-npm test        # 17 个测试：宿主契约 + 真实 git 集成
+npm test        # 23 个测试：宿主契约 + 真实 git 集成 + 轮次触发
 ```
 
-`tests/git-engine.test.mjs` 用真实 git 和真实 bare 仓库当远端，覆盖：首次初始化并推送、
-无变更空跑、分叉后 rebase 并推送、**真冲突时停住且工作区未被破坏**、敏感文件拒提交、
-父仓库内建独立仓库 / 配置为拒绝、push-only 与 pull-only 的单向语义、未配置远端。
+- `tests/git-engine.test.mjs` 用真实 git 和真实 bare 仓库当远端，覆盖：首次初始化并推送、
+  无变更空跑、分叉后 rebase 并推送、**真冲突时停住且工作区未被破坏**、敏感文件拒提交、
+  父仓库内建独立仓库 / 配置为拒绝、push-only 与 pull-only 的单向语义、未配置远端。
+- `tests/turn-sync.test.mjs` 驱动真实的 `turn/end` 监听器：区域内的一轮触发同步并真的推送到
+  远端；区域外的一轮被忽略；`syncAllOnTurnEnd` 让无关轮次也同步；连发 4 次轮次边界**合并为一次**
+  同步；`syncOnTurnEnd: false` 关闭；失败不会从监听器抛出且 `running` 标志被清回 false。
 
 > 测试进程设置 `GIT_CEILING_DIRECTORIES`：本机 `C:\Users\xiongyb\.git` 存在，
 > 即**家目录本身是一个 git 仓库**，否则临时目录会被误判为「位于父仓库内部」。
+
+## 每轮对话触发
+
+`ctx.on('session/event')` 里只看 `event.type === 'turn/end'`（所有退出路径都会发出，含抛错）。
+`session/event` 监听器是**提交后、fire-and-forget、异常被吞**的，所以同步再慢也不会拖慢或
+破坏对话。
+
+- 默认只同步**包含该会话工作目录**（`session.header.cwd`）的区域；
+  勾选「每轮同步全部区域」则每轮同步全部启用的区域。
+- 防抖窗口内的多次轮次边界**合并成一次** pass（`debounceMs`，默认 5s）。
+- 全局**单飞**：同一时刻只有一个 git 序列在跑，其余排队。
+- 插件卸载时清掉待触发定时器并等待在途 pass 收尾。
+
 
 ## 同步引擎行为
 

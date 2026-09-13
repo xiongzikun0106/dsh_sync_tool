@@ -422,6 +422,13 @@ function SyncCard(props) {
         disabled: !writable,
         onChange: (next) => { void write('syncOnStartup', next) },
       }),
+      Checkbox({
+        label: '每轮同步全部区域',
+        title: '默认只同步「包含当前会话工作目录」的区域；勾选后每轮都同步全部启用的区域',
+        checked: value.syncAllOnTurnEnd === true,
+        disabled: !writable,
+        onChange: (next) => { void write('syncAllOnTurnEnd', next) },
+      }),
       React.createElement(
         'label',
         { style: styles.label },
