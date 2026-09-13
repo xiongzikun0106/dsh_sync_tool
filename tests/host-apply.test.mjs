@@ -45,6 +45,7 @@ test('an area needs only id and path; the rest defaults', () => {
     autoCommit: true,
     extraIgnores: [],
     guardSensitive: true,
+    nestedRepos: 'init',
   })
 })
 
@@ -69,13 +70,29 @@ test('status defaults to an empty, not-running document', () => {
   })
 })
 
-test('apply registers the config section and the status namespace', () => {
+/**
+ * A minimal host context: the services `apply` reads, plus an `effect` that
+ * understands both the plain-disposer and generator forms.
+ */
+function stubContext() {
   const injected = []
   const sections = []
   const registered = []
-  let sourceThunk
+  const disposers = []
 
   const ctx = {
+    get: () => undefined,
+    effect(callback, _name) {
+      const result = callback()
+      if (result !== undefined && typeof result.next === 'function') {
+        // Generator form: the body does not run until the first next().
+        const step = result.next()
+        if (step.done !== true && typeof step.value === 'function') disposers.push(step.value)
+      } else if (typeof result === 'function') {
+        disposers.push(result)
+      }
+      return () => {}
+    },
     inject(dependencies, callback) {
       injected.push(dependencies)
       callback({
@@ -98,6 +115,12 @@ test('apply registers the config section and the status namespace', () => {
     },
   }
 
+  return { ctx, injected, sections, registered, disposers }
+}
+
+test('apply registers the config section and the status namespace', () => {
+  const { ctx, injected, sections, registered, disposers } = stubContext()
+
   const entry = Config({})
   apply(ctx, entry)
 
@@ -117,11 +140,17 @@ test('apply registers the config section and the status namespace', () => {
   assert.equal(registered[0].namespace, STATUS_NAMESPACE)
   assert.equal(registered[0].schema, StatusConfig)
   assert.ok(registered[0].options.base !== undefined, 'the status namespace declares a composition base')
-  sourceThunk = registered[0].value
-  assert.ok(sourceThunk !== undefined)
+  // The initial publish ran: a valid status document with the configured areas.
+  assert.equal(registered[0].value.running, false)
+  assert.deepEqual(registered[0].value.areas, [])
+
+  assert.equal(disposers.length, 1, 'a drain disposer is registered on the fiber')
+  assert.equal(typeof disposers[0], 'function')
 })
 
 test('apply stays inert when no settings provider is composed', () => {
-  const ctx = { inject(_dependencies, _callback) { /* provider absent: callback never runs */ } }
+  const { ctx, disposers } = stubContext()
+  ctx.inject = (_dependencies, _callback) => { /* provider absent: callback never runs */ }
   assert.doesNotThrow(() => { apply(ctx, Config({})) })
+  assert.equal(disposers.length, 1, 'the drain effect is still registered')
 })

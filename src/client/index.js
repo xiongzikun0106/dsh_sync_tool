@@ -270,6 +270,28 @@ function AreaRow(props) {
         React.createElement('option', { value: 'push' }, '仅 push'),
         React.createElement('option', { value: 'pull' }, '仅 pull'),
       ),
+      React.createElement('span', { style: styles.fieldLabel }, '选项'),
+      React.createElement(
+        'div',
+        { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+        Checkbox({
+          label: '自动提交',
+          checked: area.autoCommit !== false,
+          onChange: (next) => { onPatch(area.id, { autoCommit: next }) },
+        }),
+        Checkbox({
+          label: '敏感文件保护',
+          title: '暂存区出现 .credentials.yaml、.env、私钥等文件时拒绝自动提交',
+          checked: area.guardSensitive !== false,
+          onChange: (next) => { onPatch(area.id, { guardSensitive: next }) },
+        }),
+        Checkbox({
+          label: '父仓库内建库',
+          title: '该目录位于另一个 git 仓库内部时（例如家目录本身是仓库），在它内部初始化独立仓库；关闭则拒绝操作',
+          checked: (area.nestedRepos ?? 'init') === 'init',
+          onChange: (next) => { onPatch(area.id, { nestedRepos: next ? 'init' : 'refuse' }) },
+        }),
+      ),
     ),
     state.detail !== ''
       ? React.createElement('div', { style: { ...styles.status, color: STATUS_COLOR[state.status] ?? 'inherit' } }, state.detail)

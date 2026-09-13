@@ -1,7 +1,8 @@
 /**
- * Build the two artifacts the DSH loader and the web client consume.
+ * Build the artifacts the DSH loader and the web client consume.
  *
- *  - `lib/index.js`  — the Host half, copied from `src/host/index.js`.
+ *  - `lib/*.js`      — the Host half, copied from `src/host/*.js`. The entry is
+ *    `src/host/index.js`; sibling modules keep working through relative imports.
  *  - `lib/client.js` — the browser half, wrapped in the lazy-CJS closure
  *    factory the client module table expects:
  *
@@ -11,7 +12,7 @@
  *    tsdown preset is not published; the format is the whole contract, and
  *    the banner/footer/intro below mirror it exactly.
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -28,7 +29,17 @@ function indent(source, tabs) {
     .join('\n')
 }
 
-const hostSource = await readFile(join(root, 'src', 'host', 'index.js'), 'utf8')
+const hostDir = join(root, 'src', 'host')
+await mkdir(join(root, 'lib'), { recursive: true })
+
+const hostFiles = (await readdir(hostDir)).filter(name => name.endsWith('.js')).sort()
+let hostBytes = 0
+for (const name of hostFiles) {
+  const source = await readFile(join(hostDir, name), 'utf8')
+  await writeFile(join(root, 'lib', name), source)
+  hostBytes += source.length
+}
+
 const clientSource = await readFile(join(root, 'src', 'client', 'index.js'), 'utf8')
 
 const clientBundle = [
@@ -44,8 +55,7 @@ const clientBundle = [
   '',
 ].join('\n')
 
-await mkdir(join(root, 'lib'), { recursive: true })
-await writeFile(join(root, 'lib', 'index.js'), hostSource)
 await writeFile(join(root, 'lib', 'client.js'), clientBundle)
 
-console.log(`built lib/index.js (${hostSource.length} B) and lib/client.js (${clientBundle.length} B)`)
+console.log(`built lib/${hostFiles.join(', lib/')} (${hostBytes} B) and lib/client.js (${clientBundle.length} B)`)
+

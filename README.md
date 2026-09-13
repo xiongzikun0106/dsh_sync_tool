@@ -16,10 +16,43 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 包骨架 + bundle 行 + 客户端卡片 + 构建 + 安装验证 | ✅ 完成 |
-| P1 | settings 命名空间 + 工作区域 CRUD + 目录选择 | ⏳ |
-| P2 | git 引擎 + 手动同步 + 状态与历史 | ⏳ |
+| P1 | settings 命名空间 + 工作区域 CRUD + 目录选择 + 宿主状态发布 | ✅ 完成 |
+| P2 | git 引擎（`ctx.subprocess`）+ 手动同步 + 状态与历史 | ✅ 完成 |
 | P3 | `turn/end` 自动同步 + 防抖单飞队列 + 冲突停靠 | ⏳ |
-| P4 | 跨机验证 + 便携清单 `.dsh-sync.yml` + 文档 | ⏳ |
+| P4 | 跨机验证 + 便携清单 `.dsh-sync.yml` + 最终文档 | ⏳ |
+
+## 测试
+
+```sh
+npm test        # 17 个测试：宿主契约 + 真实 git 集成
+```
+
+`tests/git-engine.test.mjs` 用真实 git 和真实 bare 仓库当远端，覆盖：首次初始化并推送、
+无变更空跑、分叉后 rebase 并推送、**真冲突时停住且工作区未被破坏**、敏感文件拒提交、
+父仓库内建独立仓库 / 配置为拒绝、push-only 与 pull-only 的单向语义、未配置远端。
+
+> 测试进程设置 `GIT_CEILING_DIRECTORIES`：本机 `C:\Users\xiongyb\.git` 存在，
+> 即**家目录本身是一个 git 仓库**，否则临时目录会被误判为「位于父仓库内部」。
+
+## 同步引擎行为
+
+每个工作区域一次同步依次执行：识别仓库 → 对齐 `origin` → 提交本地变更 →
+拉取并整合 → 推送。
+
+- **空远端是正常起点**：`git fetch --prune origin`（不是取单个 refspec，否则首次推送会因
+  `couldn't find remote ref` 直接失败）。
+- **整合策略**：仅远端领先 → `merge --ff-only`；双方都领先 → `pull --rebase --autostash`。
+- **冲突即停**：rebase 失败一律 `git rebase --abort` 复原，状态置为 `conflict`，
+  **绝不自动解决冲突**，也绝不把半完成的 rebase 留给用户。
+- **父仓库内的目录**：默认在该目录内初始化**独立嵌套仓库**
+  （家目录是仓库时 `$DSH_HOME` 下的资产正属此列）；可在区域选项里改为拒绝。
+- **敏感文件保护**：暂存区出现 `.credentials.yaml`、`.env`、`.netrc`、`settings.yaml`、
+  私钥时拒绝自动提交，且不推送任何东西。
+- **凭据**：token 经 `ctx.credentials` 读取，以 `GIT_CONFIG_COUNT/KEY_0/VALUE_0` 环境变量
+  注入 `http.extraheader`（git 2.31+），**不进 argv、不落盘**；输出里的 token 会被替换为 `***`。
+- 新建目录会自动写入一份 `.gitignore`（`node_modules/`、`lib/`、`dist/`、`*.log`、
+  `.credentials.yaml`、`settings.yaml`）。
+
 
 ## 构建
 

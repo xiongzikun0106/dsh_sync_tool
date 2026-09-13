@@ -11,12 +11,16 @@
  *                       claims the key, so the Plugins tab renders no second
  *                       card for it.
  *
- * The git engine and the `turn/end` hook are added in later stages; see PLAN.md.
+ * Settings is also the command channel: an out-of-tree plugin has no generated
+ * Remote namespace, so the card bumps `request.token` and this half watches the
+ * committed value. The git engine lives in `./git.js`.
  */
 import { statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 
 import z from '@deepseek-ai/schemastery'
+
+import { buildCommitMessage, GitEngine } from './git.js'
 
 /** Cordis plugin name (the loader row's `name` is the module specifier). */
 export const name = 'sync-tool'
@@ -32,6 +36,9 @@ export const AREA_STATUS = Object.freeze(['idle', 'validating', 'syncing', 'ok',
 
 /** Sync directions. */
 export const DIRECTIONS = Object.freeze(['both', 'push', 'pull'])
+
+/** Command kinds the card may request. */
+export const REQUEST_KINDS = Object.freeze(['none', 'sync'])
 
 /** One work area: the local folder and the remote it syncs with. */
 const AreaSchema = z.object({
@@ -55,8 +62,14 @@ const AreaSchema = z.object({
   autoCommit: z.boolean().default(true),
   /** Extra ignore patterns on top of the built-in set. */
   extraIgnores: z.array(z.string()).default([]),
-  /** Treat matching paths as fatal to commit (safety net). */
+  /** Refuse to commit when a sensitive file is staged. */
   guardSensitive: z.boolean().default(true),
+  /**
+   * What to do when the folder sits inside another checkout — common when the
+   * home directory is itself a repository and the DSH assets live beneath it.
+   * `init` creates an independent nested repository; `refuse` reports an error.
+   */
+  nestedRepos: z.union(['init', 'refuse']).default('init'),
 })
 
 /**
@@ -68,7 +81,7 @@ export const Config = z.object({
   enabled: z.boolean().default(true),
   /** Sync the work areas a finished turn touched. */
   syncOnTurnEnd: z.boolean().default(true),
-  /** Run one pull/sync for every enabled area when the Host starts. */
+  /** Run one pass over every enabled area when the Host starts. */
   syncOnStartup: z.boolean().default(false),
   /** Coalescing window for bursty turn boundaries, in milliseconds. */
   debounceMs: z.natural().default(5000),
@@ -86,10 +99,10 @@ export const Config = z.object({
   request: z.object({
     /** Monotonic request id; a change is what the Host acts on. */
     token: z.natural().default(0),
-    /** Target area for `syncArea`; empty targets every enabled area. */
+    /** Target area for a sync; empty targets every enabled area. */
     areaId: z.string().default(''),
     /** `none` is the idle value. */
-    kind: z.union(['none', 'sync']).default('none'),
+    kind: z.union([...REQUEST_KINDS]).default('none'),
     /** When the card issued the request. */
     at: z.natural().default(0),
   }).default({ token: 0, areaId: '', kind: 'none', at: 0 }),
@@ -122,14 +135,14 @@ export const StatusConfig = z.object({
   running: z.boolean().default(false),
   /** Timestamp of the last publish. */
   updatedAt: z.natural().default(0),
-  /** Folder validation results, keyed by area id. */
+  /** Latest state per configured area. */
   areas: z.array(AreaStatusSchema).default([]),
   /** Most recent results, newest last, capped at `historyLimit`. */
   history: z.array(HistoryEntrySchema).default([]),
 })
 
 /** Why one area's folder is unusable, or undefined when it is fine. */
-function folderProblem(path) {
+export function folderProblem(path) {
   if (typeof path !== 'string' || path.trim() === '') return '路径为空 / empty path'
   if (!isAbsolute(path)) return '必须是绝对路径 / not an absolute path'
   let stats
@@ -152,58 +165,182 @@ export function apply(ctx, config) {
   // provider is attached, the composition entry otherwise.
   let resolveConfig = () => config
 
-  // Status scope, filled in when the settings provider is present.
-  let publish = () => {}
-  let publishedRevision = 0
+  /** Runtime state the engine writes and the status publisher reads. */
+  const runtime = {
+    running: false,
+    areas: new Map(),
+    history: [],
+    revision: 0,
+    statusScope: undefined,
+    seenRequestToken: -1,
+    disposed: false,
+  }
+
+  const engine = new GitEngine(ctx, { log: () => {} })
+
+  /** Serialize every pass: one git sequence at a time, globally. */
+  let queue = Promise.resolve()
+
+  const warn = (message) => { console.warn(`[sync-tool] ${message}`) }
+
+  /** Read the configured areas, normalized. */
+  const configuredAreas = () => {
+    const current = resolveConfig() ?? {}
+    return Array.isArray(current.areas) ? current.areas : []
+  }
+
+  /** Compute and write the status document. */
+  const publish = () => {
+    const scope = runtime.statusScope
+    if (scope === undefined) return
+    const current = resolveConfig() ?? {}
+    const limit = Number.isFinite(current.historyLimit) ? current.historyLimit : 20
+
+    const areas = configuredAreas().map((area) => {
+      const observed = runtime.areas.get(area.id)
+      const problem = folderProblem(area.path)
+      if (problem !== undefined) {
+        return { id: area.id, status: 'error', at: Date.now(), detail: problem, head: '', ahead: 0, behind: 0 }
+      }
+      return observed ?? { id: area.id, status: 'idle', at: 0, detail: '', head: '', ahead: 0, behind: 0 }
+    })
+
+    runtime.revision += 1
+    void scope.replace({
+      revision: runtime.revision,
+      running: runtime.running,
+      updatedAt: Date.now(),
+      areas,
+      history: runtime.history.slice(-Math.max(1, limit)),
+    }).catch((error) => {
+      warn(`status publish failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /** Resolve one area's credential value through the credentials seam. */
+  const resolveCredential = async (ref) => {
+    if (typeof ref !== 'string' || ref === '') return undefined
+    const credentials = ctx.get('credentials')
+    if (credentials === undefined) return undefined
+    try {
+      const hit = await credentials.resolve(ref)
+      return hit === undefined ? undefined : hit.value
+    } catch (error) {
+      warn(`credential "${ref}" could not be resolved: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  /** Run one sync pass over the selected areas, publishing as it goes. */
+  const runPass = async (options = {}) => {
+    const current = resolveConfig() ?? {}
+    const selected = configuredAreas().filter(area => area.enabled !== false
+      && (options.areaId === undefined || options.areaId === '' || area.id === options.areaId))
+
+    runtime.running = true
+    publish()
+    try {
+      for (const area of selected) {
+        if (runtime.disposed) return
+        const problem = folderProblem(area.path)
+        if (problem !== undefined) {
+          runtime.areas.set(area.id, { status: 'error', at: Date.now(), detail: problem, head: '', ahead: 0, behind: 0 })
+          publish()
+          continue
+        }
+        runtime.areas.set(area.id, { status: 'syncing', at: Date.now(), detail: '同步中…', head: '', ahead: 0, behind: 0 })
+        publish()
+
+        const credential = await resolveCredential(area.credentialRef)
+        let result
+        try {
+          result = await engine.syncArea({
+            area,
+            config: current,
+            credential,
+            turn: options.turn ?? 0,
+            signal: options.signal,
+          })
+        } catch (error) {
+          result = {
+            status: 'error',
+            detail: `同步失败：${error instanceof Error ? error.message : String(error)}`,
+            head: '',
+            ahead: 0,
+            behind: 0,
+          }
+        }
+
+        const value = { ...result, at: Date.now() }
+        runtime.areas.set(area.id, value)
+        const name = area.name !== undefined && area.name !== '' ? area.name : area.path
+        runtime.history.push({
+          at: value.at,
+          areaId: area.id,
+          ok: value.status === 'ok',
+          summary: `${name} · ${value.detail}`,
+        })
+        publish()
+      }
+    } finally {
+      runtime.running = false
+      publish()
+    }
+  }
+
+  /** Queue one pass behind whatever is already running. */
+  const enqueuePass = (options = {}) => {
+    const next = queue.then(() => runPass(options), () => runPass(options))
+    queue = next.then(() => undefined, () => undefined)
+    return next
+  }
+
+  ctx.effect(function* () {
+    // Keep the fiber alive across an in-flight pass, and stop accepting new work
+    // the moment this plugin unloads.
+    yield async () => {
+      runtime.disposed = true
+      await queue
+    }
+  }, 'sync-tool: pass drain')
 
   ctx.inject(['settings'], (settingsCtx) => {
     const settings = settingsCtx.settings
 
     settings.installSection(ctx, SYNC_NAMESPACE, Config, config, {
       setSource: (current) => { resolveConfig = current },
-      onChange: () => { publish() },
+      onChange: () => {
+        const current = resolveConfig() ?? {}
+        publish()
+        const request = current.request ?? {}
+        const token = Number.isFinite(request.token) ? Number(request.token) : 0
+        // The first observation only records the baseline.
+        if (runtime.seenRequestToken === -1) {
+          runtime.seenRequestToken = token
+          return
+        }
+        if (token === runtime.seenRequestToken) return
+        runtime.seenRequestToken = token
+        if (request.kind === 'sync' && current.enabled !== false) {
+          enqueuePass({ areaId: typeof request.areaId === 'string' ? request.areaId : '' })
+        }
+      },
     })
 
     // The status namespace is Host-owned: published wholesale, never merged,
     // because `update` deep-merges and would splice lists element-wise.
-    const statusScope = settings.register(STATUS_NAMESPACE, StatusConfig, {
+    runtime.statusScope = settings.register(STATUS_NAMESPACE, StatusConfig, {
       base: { revision: 0, running: false, updatedAt: 0, areas: [], history: [] },
     })
 
-    /** Compute and write the status document. */
-    publish = () => {
-      const current = resolveConfig() ?? {}
-      const areas = Array.isArray(current.areas) ? current.areas : []
-      const previous = statusScope.get() ?? {}
-      const kept = new Map(
-        (Array.isArray(previous.areas) ? previous.areas : []).map(entry => [entry.id, entry]),
-      )
-
-      const reported = areas.map((area) => {
-        const problem = folderProblem(area.path)
-        const before = kept.get(area.id)
-        // A folder problem is a fresh fact and wins; otherwise keep what the
-        // engine last reported for this area.
-        if (problem !== undefined) {
-          return { id: area.id, status: 'error', at: Date.now(), detail: problem, head: '', ahead: 0, behind: 0 }
-        }
-        return before ?? { id: area.id, status: 'idle', at: 0, detail: '', head: '', ahead: 0, behind: 0 }
-      })
-
-      publishedRevision += 1
-      void statusScope.replace({
-        revision: publishedRevision,
-        running: previous.running === true,
-        updatedAt: Date.now(),
-        areas: reported,
-        history: Array.isArray(previous.history) ? previous.history : [],
-      }).catch((error) => {
-        console.warn(`[sync-tool] status publish failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }
-
     publish()
+
+    if ((resolveConfig() ?? {}).enabled !== false && (resolveConfig() ?? {}).syncOnStartup === true) {
+      enqueuePass({})
+    }
   })
 
   console.log(`[sync-tool] host half loaded (namespaces "${SYNC_NAMESPACE}", "${STATUS_NAMESPACE}")`)
 }
+
+export { buildCommitMessage, GitEngine }
