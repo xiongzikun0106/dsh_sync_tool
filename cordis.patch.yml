@@ -1,0 +1,8 @@
+# dsh-sync-tool bundle layer.
+#
+# Mounts the Host half as an ordinary loader row. The row name is the module
+# specifier, so Node resolution finds this package from the profile directory.
+- insert:
+    - id: sync-tool
+      name: dsh-sync-tool
+      config: {}

@@ -1,0 +1,9 @@
+# Local dev dependency shims (resolved from the DSH install at runtime)
+node_modules/
+
+# Build output (regenerate with `npm run build`)
+lib/
+
+*.log
+.DS_Store
+Thumbs.db
