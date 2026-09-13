@@ -6,7 +6,7 @@
  * every git invocation is genuine. Run with `node --test tests/*.test.mjs`.
  */
 import assert from 'node:assert/strict'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -107,6 +107,15 @@ test('a finished turn inside an area syncs that area', async () => {
     assert.equal(git(world.remote, ['rev-parse', 'main']).trim(), area.head)
     assert.ok(existsSync(join(world.work, '.gitignore')))
     assert.match(host.state.status.history[0].summary, /turn 5|A ·/u)
+
+    // The repository is self-describing for the next machine.
+    const manifest = JSON.parse(readFileSync(join(world.work, '.dsh-sync.json'), 'utf8'))
+    assert.equal(manifest.version, 1)
+    assert.equal(manifest.remote, world.remote)
+    assert.equal(manifest.branch, 'main')
+    assert.equal('path' in manifest, false, 'the local path is not in the manifest')
+    // And the manifest travelled to the remote with the commit.
+    assert.ok(git(world.remote, ['ls-tree', '--name-only', 'main']).includes('.dsh-sync.json'))
   } finally {
     world.cleanup()
   }

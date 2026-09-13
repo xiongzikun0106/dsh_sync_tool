@@ -20,7 +20,8 @@ import { isAbsolute } from 'node:path'
 
 import z from '@deepseek-ai/schemastery'
 
-import { buildCommitMessage, GitEngine, pathContains } from './git.js'
+import { buildCommitMessage, GitEngine, normalizePath, pathContains } from './git.js'
+import { areaFromManifest, baseName, MANIFEST_NAME, readManifest, writeManifest } from './portable.js'
 
 /** Cordis plugin name (the loader row's `name` is the module specifier). */
 export const name = 'sync-tool'
@@ -38,7 +39,7 @@ export const AREA_STATUS = Object.freeze(['idle', 'validating', 'syncing', 'ok',
 export const DIRECTIONS = Object.freeze(['both', 'push', 'pull'])
 
 /** Command kinds the card may request. */
-export const REQUEST_KINDS = Object.freeze(['none', 'sync'])
+export const REQUEST_KINDS = Object.freeze(['none', 'sync', 'import'])
 
 /** One work area: the local folder and the remote it syncs with. */
 const AreaSchema = z.object({
@@ -265,6 +266,14 @@ export function apply(ctx, config) {
         runtime.areas.set(area.id, { id: area.id, status: 'syncing', at: Date.now(), detail: '同步中…', head: '', ahead: 0, behind: 0 })
         publish()
 
+        // Keep the repository self-describing before the commit, so the
+        // manifest travels with the folder to the next machine.
+        try {
+          writeManifest(area.path, area)
+        } catch (error) {
+          warn(`manifest write failed for "${area.path}": ${error instanceof Error ? error.message : String(error)}`)
+        }
+
         const credential = await resolveCredential(area.credentialRef)
         let result
         try {
@@ -381,6 +390,40 @@ export function apply(ctx, config) {
   ctx.inject(['settings'], (settingsCtx) => {
     const settings = settingsCtx.settings
 
+    /**
+     * Adopt a folder another machine already synced: read its portable manifest
+     * and append a work area for this machine. Only the machine-independent
+     * facts come from the manifest — path, id, enabled flag and credential
+     * reference are decided here.
+     * @param path - absolute folder the operator picked.
+     */
+    const importArea = async (path) => {
+      if (typeof path !== 'string' || path.trim() === '') return
+      const manifest = readManifest(path)
+      if (manifest === undefined) {
+        warn(`"${path}" has no ${MANIFEST_NAME}; nothing to import`)
+        return
+      }
+      const current = configuredAreas()
+      if (current.some(area => normalizePath(area.path) === normalizePath(path))) {
+        warn(`"${path}" is already a configured work area`)
+        return
+      }
+      const area = areaFromManifest(path, manifest, `imported-${Date.now().toString(36)}`)
+      try {
+        await settings.mutate(SYNC_NAMESPACE, [{ op: 'set', path: ['areas'], value: [...current, area] }])
+        runtime.history.push({
+          at: Date.now(),
+          areaId: area.id,
+          ok: true,
+          summary: `已从 ${baseName(path)} 导入配置（远端 ${area.remote === '' ? '未设置' : area.remote}）`,
+        })
+      } catch (error) {
+        warn(`import failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      publish()
+    }
+
     settings.installSection(ctx, SYNC_NAMESPACE, Config, config, {
       setSource: (current) => { resolveConfig = current },
       onChange: () => {
@@ -397,6 +440,8 @@ export function apply(ctx, config) {
         runtime.seenRequestToken = token
         if (request.kind === 'sync' && current.enabled !== false) {
           enqueuePass({ areaId: typeof request.areaId === 'string' ? request.areaId : '' })
+        } else if (request.kind === 'import') {
+          void importArea(typeof request.areaId === 'string' ? request.areaId : '')
         }
       },
     })

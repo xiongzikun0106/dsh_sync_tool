@@ -386,6 +386,27 @@ function SyncCard(props) {
     })
   }
 
+  /** Ask the Host to adopt a folder another machine already synced. */
+  const importFromRepo = async () => {
+    setError('')
+    setBusy(true)
+    try {
+      const picked = await props.pickDirectory(new AbortController().signal)
+      if (typeof picked !== 'string' || picked === '') return
+      const request = value.request ?? {}
+      await write('request', {
+        token: (request.token ?? 0) + 1,
+        areaId: picked,
+        kind: 'import',
+        at: Date.now(),
+      })
+    } catch (cause) {
+      setError(`导入失败 / import failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   /** Ask the Host for a shortcut path it can write to. */
   const quickAdds = [
     { label: '预设目录', path: props.presetsPath },
@@ -478,6 +499,12 @@ function SyncCard(props) {
         disabled: !writable || areas.length === 0,
         onClick: () => { requestSync('') },
       }, '立即同步全部'),
+      React.createElement('button', {
+        style: styles.button,
+        disabled: busy || !writable,
+        title: '选择一台机器已同步过的目录，读取其中的 .dsh-sync.json 并添加为工作区域',
+        onClick: () => { void importFromRepo() },
+      }, '从仓库导入'),
     ),
 
     React.createElement(
