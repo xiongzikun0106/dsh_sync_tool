@@ -360,6 +360,7 @@ function SyncCard(props) {
       autoCommit: true,
       extraIgnores: [],
       guardSensitive: true,
+      nestedRepos: 'init',
     }])
   }
 
@@ -537,7 +538,7 @@ function SyncCard(props) {
       { style: styles.status },
       status.status === 'ready'
         ? `${statusValue.running === true ? '同步进行中' : '空闲'} · 更新于 ${statusValue.updatedAt ? new Date(statusValue.updatedAt).toLocaleString() : '—'}`
-        : `状态命名空间：${status.status}`,
+        : status.status === 'loading' ? '读取状态中…' : `状态命名空间不可用（${status.status}）`,
     ),
     history.length === 0
       ? React.createElement('p', { style: styles.notice }, '暂无同步历史。')

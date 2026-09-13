@@ -24,9 +24,12 @@
 ## 测试
 
 ```sh
-npm test        # 29 个测试：宿主契约 + 真实 git 集成 + 轮次触发 + 便携清单
+npm test        # 35 个测试：宿主契约 + 真实 git 集成 + 轮次触发 + 便携清单 + 浏览器半边
 ```
 
+- `tests/host-apply.test.mjs` 钉住宿主契约：命名空间用 `installSection` 注册、
+  状态命名空间是宿主全量发布、`session/event` 钩子挂在 fiber 上、
+  没有 settings provider 时依然可加载。
 - `tests/git-engine.test.mjs` 用真实 git 和真实 bare 仓库当远端，覆盖：首次初始化并推送、
   无变更空跑、分叉后 rebase 并推送、**真冲突时停住且工作区未被破坏**、敏感文件拒提交、
   父仓库内建独立仓库 / 配置为拒绝、push-only 与 pull-only 的单向语义、未配置远端。
@@ -35,6 +38,12 @@ npm test        # 29 个测试：宿主契约 + 真实 git 集成 + 轮次触发
   同步；`syncOnTurnEnd: false` 关闭；失败不会从监听器抛出且 `running` 标志被清回 false。
 - `tests/portable.test.mjs` 便携清单往返：**路径 / id / 凭据引用 / 启用位永不进入清单**，
   导入时在本机重新决定；机器本地变化不会让清单产生噪声提交。
+- `tests/client-card.test.mjs` 把 `lib/client.js` 按浏览器模块表的方式加载
+  （假 `window.__ModuleLoader__` + 假 `require('react')`），断言注册契约
+  （slot `settings.plugin.item`、key `sync-tool`、绑定两个命名空间），
+  并**真实遍历渲染出的元素树**：空配置、有区域（含状态与历史）、加载中、
+  以及没有目录选择器时仍可手动输入；还验证「添加」写 `areas`、「导入」写 `request`。
+
 
 > 测试进程设置 `GIT_CEILING_DIRECTORIES`：本机 `C:\Users\xiongyb\.git` 存在，
 > 即**家目录本身是一个 git 仓库**，否则临时目录会被误判为「位于父仓库内部」。
