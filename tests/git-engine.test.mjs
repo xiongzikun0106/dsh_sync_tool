@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import {
-  buildCommitMessage, GitEngine, normalizePath, porcelainPath, scrubSecrets,
+  buildCommitMessage, GitEngine, normalizePath, pathContains, porcelainPath, scrubSecrets,
 } from '../lib/git.js'
 import {
   areaFor, CONFIG, engineContext, git, installHermeticGitEnv, makeWorld,
@@ -21,7 +21,23 @@ import {
 installHermeticGitEnv()
 
 test('pure helpers behave', () => {
-  assert.equal(normalizePath('D:\\Work\\Plugins\\'), 'd:/work/plugins')
+  // Case folding is Windows-only: a POSIX filesystem is case sensitive, so the
+  // same input must NOT be folded there.
+  assert.equal(
+    normalizePath('D:\\Work\\Plugins\\'),
+    process.platform === 'win32' ? 'd:/work/plugins' : 'D:/Work/Plugins',
+  )
+  assert.equal(normalizePath('/a/b///'), '/a/b', 'trailing separators are dropped')
+  assert.equal(normalizePath('  /a/b  '), '/a/b', 'surrounding whitespace is dropped')
+
+  // pathContains decides which areas a finished turn touches, so it must agree
+  // with normalizePath on both platforms.
+  assert.equal(pathContains('/work/plugins', '/work/plugins'), true, 'a folder contains itself')
+  assert.equal(pathContains('/work/plugins', '/work/plugins/sub/dir'), true, 'a descendant matches')
+  assert.equal(pathContains('/work/plugins', '/work/plugins-other'), false, 'a name prefix is not a descendant')
+  assert.equal(pathContains('/work/plugins', '/work'), false, 'a parent does not match')
+  assert.equal(pathContains('', '/work'), false, 'an empty root matches nothing')
+
   assert.equal(porcelainPath(' M src/index.js'), 'src/index.js')
   assert.equal(porcelainPath('R  old.js -> new.js'), 'new.js')
   assert.equal(scrubSecrets('token=abc123456 ok', ['abc123456']), 'token=*** ok')
