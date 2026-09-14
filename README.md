@@ -110,6 +110,21 @@ npm test        # 40 个测试：宿主契约 + 真实 git 集成 + 轮次触发
 - 全局**单飞**：同一时刻只有一个 git 序列在跑，其余排队。
 - 插件卸载时清掉待触发定时器并等待在途 pass 收尾。
 
+### 已知边界：一次性任务模式
+
+`dsh --profile headless "<task>"` 这类**一次任务就退进程**的用法下，`turn/end` 之后
+启动的同步会被进程拆除腰斩：宿主拆掉 `subprocess` / `settings` 时 pass 还没跑完
+（在 Linux 上实测表现为远端收不到提交、状态停在 `running: true`、只写下了
+`.dsh-sync.json`）。
+
+根因是宿主里唯一**被 await** 的轮次收尾钩子 `agent/turn-stopping` 只在轮次
+**成功收尾**时触发（`packages/core/agent-loop/src/agent.ts:315-318`，位于 `try` 内），
+出错轮次走 `catch` 直接跳过；而 `turn/end` 虽然所有路径都会发，却是
+fire-and-forget，拦不住进程退出。
+
+**持续会话（Web GUI、交互式会话）不受影响**：轮次之间进程一直活着，
+防抖窗口结束后 pass 正常跑完。一次性模式属于已知边界，**未修**。
+
 
 ## 同步引擎行为
 

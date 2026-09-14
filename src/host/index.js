@@ -199,6 +199,11 @@ export function apply(ctx, config) {
   const publish = () => {
     const scope = runtime.statusScope
     if (scope === undefined) return
+    // Teardown disposes the settings namespace around the same time our fiber's
+    // drain runs, so a publish from a pass that outlived its services is
+    // expected to fail. Once we have been told to stop, the status document is
+    // not worth a warning.
+    if (runtime.disposed) return
     const current = resolveConfig() ?? {}
     const limit = Number.isFinite(current.historyLimit) ? current.historyLimit : 20
 
