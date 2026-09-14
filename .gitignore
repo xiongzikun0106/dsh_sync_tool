@@ -4,6 +4,15 @@ node_modules/
 # Build output (regenerate with `npm run build`)
 lib/
 
+# Local-only material: VPS connection details, keys, scratch notes. Never
+# committed. The plugin's own sensitive-file guard likewise refuses to commit
+# .credentials* / .env / private-key patterns during a sync.
+.local/
+*.pem
+id_ed25519
+id_rsa
+known_hosts
+
 *.log
 .DS_Store
 Thumbs.db
