@@ -12,6 +12,11 @@
  * Host-published `sync-tool-status` namespace. Folder selection goes through
  * the already-mounted `directoryPicker` Remote; when that backend cannot serve
  * the native chooser the card falls back to a validated manual path.
+ *
+ * The same two scopes also feed a second contribution: a compact status
+ * indicator in the conversation header's right-aligned utilities seat, which
+ * expands into per-area detail, HEAD, ahead/behind and recent history. Both
+ * contributions are registered from `apply` below.
  */
 const React = require('react')
 
@@ -43,6 +48,50 @@ const STATUS_COLOR = {
   ok: 'var(--dsw-alias-state-success-primary, #16a34a)',
   conflict: 'var(--dsw-alias-state-warn-primary, #d97706)',
   error: 'var(--dsw-alias-state-error-primary, #dc2626)',
+}
+
+/**
+ * Overall indicator states, in the priority order `overallState` applies them.
+ * `loading`/`unavailable` describe the scope itself; `empty` is a plugin with
+ * no work areas configured, which is a neutral state rather than a failure.
+ */
+const OVERALL = {
+  loading: { label: '读取中', color: 'var(--dsw-alias-label-secondary, #888)' },
+  unavailable: { label: '不可用', color: 'var(--dsw-alias-label-secondary, #888)' },
+  empty: { label: '未配置', color: 'var(--dsw-alias-label-secondary, #888)' },
+  running: { label: '同步中', color: 'var(--dsw-alias-brand-primary, #3b82f6)' },
+  conflict: { label: '冲突', color: 'var(--dsw-alias-state-warn-primary, #d97706)' },
+  error: { label: '错误', color: 'var(--dsw-alias-state-error-primary, #dc2626)' },
+  ok: { label: '已同步', color: 'var(--dsw-alias-state-success-primary, #16a34a)' },
+  idle: { label: '待同步', color: 'var(--dsw-alias-label-secondary, #888)' },
+}
+
+/**
+ * Fold the Host-published status document into one overall state.
+ *
+ * Priority is a pass in flight, then any conflict, then any error, then the
+ * healthy remainder. The panel below always shows per-area truth, so an
+ * indicator reading "同步中" never hides the area rows underneath it.
+ *
+ * @param snapshot - the bound `sync-tool-status` snapshot.
+ * @returns one key of {@link OVERALL}.
+ */
+function overallState(snapshot) {
+  if (snapshot === undefined || snapshot.status === 'loading') return 'loading'
+  if (snapshot.status === 'unavailable') return 'unavailable'
+  const value = snapshot.value
+  if (value === undefined || value === null) return 'loading'
+  const areas = Array.isArray(value.areas) ? value.areas : []
+  const history = Array.isArray(value.history) ? value.history : []
+  const states = areas.map(area => area.status)
+  if (value.running === true || states.includes('syncing') || states.includes('validating')) return 'running'
+  if (states.includes('conflict')) return 'conflict'
+  if (states.includes('error')) return 'error'
+  // No configured area is a neutral state: nothing is wrong, there is just no
+  // work area yet for the plugin to report on.
+  if (areas.length === 0) return history.length === 0 ? 'empty' : 'idle'
+  if (states.every(state => state === 'idle')) return 'idle'
+  return 'ok'
 }
 
 const styles = {
@@ -138,6 +187,107 @@ const styles = {
     maxHeight: '150px',
     overflowY: 'auto',
     fontSize: '12px',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  },
+
+  // ---- Header status indicator -------------------------------------------------
+  // The wrapper is the positioning context for the dropdown. The conversation
+  // header sets no `overflow`, and `.root` is already documented as the
+  // positioning context for slot-owned absolute chrome, so the panel is not
+  // clipped by the header row.
+  indicatorWrap: { position: 'relative', display: 'flex', alignItems: 'center' },
+  indicatorButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '12px',
+    lineHeight: 1.4,
+    padding: '4px 9px',
+    borderRadius: '999px',
+    border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3))',
+    background: 'var(--dsw-alias-bg-layer-2, transparent)',
+    color: 'inherit',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+  indicatorCount: {
+    opacity: 0.55,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  },
+  dot: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    flex: 'none',
+    display: 'inline-block',
+  },
+  panel: {
+    position: 'absolute',
+    top: 'calc(100% + 8px)',
+    right: 0,
+    zIndex: 30,
+    boxSizing: 'border-box',
+    width: '340px',
+    maxWidth: '86vw',
+    maxHeight: '62vh',
+    overflowY: 'auto',
+    textAlign: 'left',
+    padding: '12px',
+    borderRadius: '10px',
+    border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.32))',
+    background: 'var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, Canvas))',
+    boxShadow: '0 8px 28px rgba(0,0,0,0.18)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+  },
+  panelHead: { display: 'flex', alignItems: 'baseline', gap: '8px' },
+  panelTitle: { fontSize: '13px', fontWeight: 600 },
+  panelMeta: { fontSize: '11px', opacity: 0.65, flex: 1 },
+  panelClose: {
+    border: 'none',
+    background: 'transparent',
+    color: 'inherit',
+    cursor: 'pointer',
+    fontSize: '15px',
+    lineHeight: 1,
+    padding: '0 2px',
+    opacity: 0.7,
+  },
+  panelEmpty: { fontSize: '12px', lineHeight: 1.5, opacity: 0.75 },
+  panelAreas: { display: 'flex', flexDirection: 'column', gap: '8px' },
+  panelArea: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '3px',
+    paddingTop: '6px',
+    borderTop: '0.5px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.2))',
+  },
+  panelAreaHead: { display: 'flex', alignItems: 'center', gap: '6px' },
+  panelAreaName: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: '12px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  panelState: { fontSize: '11px', flex: 'none' },
+  panelMono: {
+    fontSize: '11px',
+    opacity: 0.7,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  },
+  panelDetail: { fontSize: '11px', lineHeight: 1.45, opacity: 0.85, wordBreak: 'break-word' },
+  panelSection: { fontSize: '11px', fontWeight: 600, opacity: 0.75, marginBottom: '3px' },
+  panelHistory: {
+    margin: 0,
+    padding: 0,
+    listStyle: 'none',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    fontSize: '11px',
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
   },
 }
@@ -560,6 +710,170 @@ function SyncCard(props) {
   )
 }
 
+/**
+ * One work area's line inside the expanded panel. Pure: the indicator owns the
+ * only hooks in this subtree, which keeps the render order stable.
+ */
+function IndicatorAreaRow(props) {
+  const { area, status } = props
+  const state = status ?? { status: 'idle', at: 0, detail: '', head: '', ahead: 0, behind: 0 }
+  const name = area.name !== undefined && area.name !== '' ? area.name : area.path
+  const color = STATUS_COLOR[state.status] ?? 'inherit'
+  return React.createElement(
+    'div',
+    { style: styles.panelArea },
+    React.createElement(
+      'div',
+      { style: styles.panelAreaHead },
+      React.createElement('span', { style: { ...styles.dot, background: color } }),
+      React.createElement('span', { style: styles.panelAreaName, title: area.path }, name),
+      React.createElement(
+        'span',
+        { style: { ...styles.panelState, color } },
+        STATUS_LABEL[state.status] ?? state.status,
+      ),
+    ),
+    React.createElement(
+      'div',
+      { style: styles.panelMono },
+      `HEAD ${shortSha(state.head)} · ↑${state.ahead ?? 0} ↓${state.behind ?? 0}`,
+    ),
+    // The failure reason, the conflict note, or the last success summary.
+    state.detail !== '' && state.detail !== undefined
+      ? React.createElement('div', { style: { ...styles.panelDetail, color: state.status === 'error' || state.status === 'conflict' ? color : 'inherit' } }, state.detail)
+      : null,
+  )
+}
+
+/**
+ * The expanded details panel: every configured work area, its last observed
+ * result, and the most recent history entries.
+ *
+ * The status document carries only `{ id, status, at, detail, head, ahead,
+ * behind }` per area — no name or path — so the configured area list is joined
+ * in by id from the config namespace, which is why the indicator binds both
+ * scopes.
+ *
+ * Pure (no hooks) so a test can render it directly.
+ */
+function StatusPanel(props) {
+  const value = props.value ?? {}
+  const configured = Array.isArray(props.configuredAreas) ? props.configuredAreas : []
+  const observed = Array.isArray(value.areas) ? value.areas : []
+  const history = Array.isArray(value.history) ? value.history : []
+  const byId = new Map(observed.map(area => [area.id, area]))
+  // Newest last in the document, so reverse for display and cap the tail.
+  const recent = [...history].reverse().slice(0, 5)
+
+  return React.createElement(
+    'div',
+    { style: styles.panel },
+    React.createElement(
+      'div',
+      { style: styles.panelHead },
+      React.createElement('span', { style: styles.panelTitle }, '同步状态'),
+      React.createElement(
+        'span',
+        { style: styles.panelMeta },
+        value.running === true
+          ? '同步进行中'
+          : `更新于 ${value.updatedAt ? new Date(value.updatedAt).toLocaleString() : '—'}`,
+      ),
+      React.createElement('button', {
+        type: 'button',
+        style: styles.panelClose,
+        title: '收起',
+        'aria-label': '收起',
+        onClick: props.onClose,
+      }, '×'),
+    ),
+    configured.length === 0
+      ? React.createElement(
+        'div',
+        { style: styles.panelEmpty },
+        '还没有工作区域。到「设置 → Plugins → Plugin configuration」的 sync-tool 卡片里添加。',
+      )
+      : React.createElement(
+        'div',
+        { style: styles.panelAreas },
+        ...configured.map(area => React.createElement(IndicatorAreaRow, {
+          key: area.id,
+          area,
+          status: byId.get(area.id),
+        })),
+      ),
+    recent.length === 0
+      ? null
+      : React.createElement(
+        'div',
+        null,
+        React.createElement('div', { style: styles.panelSection }, '最近历史'),
+        React.createElement(
+          'ul',
+          { style: styles.panelHistory },
+          ...recent.map((entry, index) => React.createElement('li', {
+            key: `${String(entry.at)}-${String(index)}`,
+            style: { color: entry.ok ? 'inherit' : STATUS_COLOR.error },
+          }, `${entry.ok ? '✓' : '✗'} ${new Date(entry.at).toLocaleTimeString()} · ${entry.summary}`)),
+        ),
+      ),
+  )
+}
+
+/**
+ * The header status indicator: a badge showing the overall sync state, which
+ * expands into {@link StatusPanel} on click.
+ *
+ * Hooks: two scope subscriptions plus the open flag, in a fixed order. The
+ * subtree it renders is hook-free.
+ *
+ * @param props - injected `configScope` and `statusScope`.
+ * @returns the indicator element.
+ */
+function StatusIndicator(props) {
+  const config = useScope(props.configScope)
+  const status = useScope(props.statusScope)
+  // `defaultOpen` exists so the expanded panel can be rendered directly; the
+  // real interaction is the click below.
+  const [open, setOpen] = React.useState(props.defaultOpen === true)
+
+  const overall = overallState(status)
+  const tone = OVERALL[overall] ?? OVERALL.idle
+  const configured = Array.isArray(config.value?.areas) ? config.value.areas : []
+  const label = configured.length > 0
+    ? `同步：${tone.label} · ${configured.length} 个工作区域`
+    : `同步：${tone.label}`
+
+  return React.createElement(
+    'div',
+    { style: styles.indicatorWrap },
+    React.createElement(
+      'button',
+      {
+        type: 'button',
+        style: styles.indicatorButton,
+        title: label,
+        'aria-label': label,
+        'aria-expanded': open === true ? 'true' : 'false',
+        'data-sync-status': overall,
+        onClick: () => { setOpen(open !== true) },
+      },
+      React.createElement('span', { style: { ...styles.dot, background: tone.color } }),
+      React.createElement('span', null, tone.label),
+      configured.length > 0
+        ? React.createElement('span', { style: styles.indicatorCount }, String(configured.length))
+        : null,
+    ),
+    open === true
+      ? React.createElement(StatusPanel, {
+        value: status.value,
+        configuredAreas: configured,
+        onClose: () => { setOpen(false) },
+      })
+      : null,
+  )
+}
+
 /** Join a folder onto a host home path using the separator it already uses. */
 function joinPath(base, child) {
   const separator = String(base).includes('\\') ? '\\' : '/'
@@ -598,4 +912,21 @@ exports.apply = function apply(ctx) {
       }
     },
   }, SyncCard))
+
+  // A second contribution from the same two scopes: the header status badge.
+  //
+  // `conversation.session.header.utilities` is declared by
+  // @deepseek-ai/dsh-client-ui-conversation as { kind: 'list', scope: 'session' }
+  // and documented as "Right-aligned Session utilities in ascending order"
+  // (packages/client/ui-conversation/src/client/contract/slots.ts:139), which
+  // is exactly the asked-for top-right position in the main panel. The adjacent
+  // `conversation.session.header.corner` seat is `kind: 'single'` and already
+  // occupied by ui-sidebar-right's expand button, so a list seat is the only
+  // additive option. A list slot takes `id` + `order`, not `key`.
+  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+    name: 'conversation.session.header.utilities',
+    id: 'sync-tool-status',
+    order: 40,
+    inject: () => ({ configScope, statusScope }),
+  }, StatusIndicator))
 }

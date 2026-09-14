@@ -6,8 +6,39 @@
 
 - 宿主半边（Host）：注册 `sync-tool` settings 命名空间、工作区域注册表、git 引擎，
   并挂 `turn/end` 钩子。
-- 浏览器半边（Client）：设置 → **Plugins** → 「Plugin configuration」标签页中的
-  `sync-tool` 卡片，用于选择工作区域、配置远端与查看同步状态。
+- 浏览器半边（Client）有**两处**贡献：
+  1. 设置 → **Plugins** → 「Plugin configuration」标签页中的 `sync-tool` 卡片，
+     用于选择工作区域、配置远端与查看同步状态。
+  2. 主面板会话标题栏**右上角**的状态徽标（`conversation.session.header.utilities`），
+     一眼可看总体状态，点击展开每个工作区域的状态 / HEAD / 领先落后 / 最近历史 / 失败原因。
+
+### 状态指示器
+
+| 总体状态 | 显示 | 判定 |
+|---|---|---|
+| 读取中 / 不可用 | 中性灰 | scope 自身还没就绪 |
+| 未配置 | 中性灰 | 没有任何工作区域（**中性，不是错误**） |
+| 同步中 | 品牌蓝 | `running`，或任一区域 `syncing`/`validating` |
+| 冲突 | 警告橙 | 任一区域 `conflict` |
+| 错误 | 错误红 | 任一区域 `error` |
+| 已同步 / 待同步 | 成功绿 / 中性灰 | 其余情况 |
+
+优先级即上表自上而下；展开面板**始终显示每个区域的真实状态**，所以徽标显示「同步中」时
+也不会掩盖底下的冲突或错误。
+
+插槽选择依据（已核实，非杜撰）：
+
+- `conversation.session.header.utilities` 由 `@deepseek-ai/dsh-client-ui-conversation` 声明为
+  `{ kind: 'list', scope: 'session' }`，文档描述为
+  **"Right-aligned Session utilities in ascending order"**
+  （`packages/client/ui-conversation/src/client/contract/slots.ts:139`），正是要的右上角位置。
+- 紧邻的 `conversation.session.header.corner` 是 `kind: 'single'`，且**已被**
+  `ui-sidebar-right` 的展开按钮占用，无法追加；list 座位是唯一可加的。
+- 因此 `package.json` 的 `dsh.client.inject` 补上了 `@deepseek-ai/dsh-client-ui-conversation`。
+- **没有**一个 root 作用域的「主面板右上角」座位：`shell.overlay` 是 root 作用域的浮动层，
+  文档明确欢迎「badge / status pill」，但它覆盖整帧、需要自己 fixed 定位，会与会话标题栏
+  自己的右上角控件（utilities / corner）打架。所以选了会话作用域的 `utilities`。
+  代价：**空白/英雄页（没有会话时）不显示该徽标**。
 
 完整设计（含已验证的机制与证据）见 [`PLAN.md`](./PLAN.md)。
 
@@ -24,7 +55,7 @@
 ## 测试
 
 ```sh
-npm test        # 35 个测试：宿主契约 + 真实 git 集成 + 轮次触发 + 便携清单 + 浏览器半边
+npm test        # 40 个测试：宿主契约 + 真实 git 集成 + 轮次触发 + 便携清单 + 浏览器半边
 ```
 
 - `tests/host-apply.test.mjs` 钉住宿主契约：命名空间用 `installSection` 注册、
@@ -40,9 +71,14 @@ npm test        # 35 个测试：宿主契约 + 真实 git 集成 + 轮次触发
   导入时在本机重新决定；机器本地变化不会让清单产生噪声提交。
 - `tests/client-card.test.mjs` 把 `lib/client.js` 按浏览器模块表的方式加载
   （假 `window.__ModuleLoader__` + 假 `require('react')`），断言注册契约
-  （slot `settings.plugin.item`、key `sync-tool`、绑定两个命名空间），
-  并**真实遍历渲染出的元素树**：空配置、有区域（含状态与历史）、加载中、
-  以及没有目录选择器时仍可手动输入；还验证「添加」写 `areas`、「导入」写 `request`。
+  （slot `settings.plugin.item` 用 `key`、slot `conversation.session.header.utilities`
+  用 `id` + `order`、绑定两个命名空间），
+  并**真实遍历渲染出的元素树**：
+  - 卡片：空配置、有区域（含状态与历史）、加载中、没有目录选择器时仍可手动输入；
+    「添加」写 `areas`、「导入」写 `request`。
+  - 指示器：八种总体状态各自的文案；并用**带状态的假 React 真的点击徽标**，
+    验证展开后出现区域名（来自 config scope）、HEAD、↑/↓、失败原因与历史，
+    再点「收起」确认收起；另验证无区域时面板指向卡片、无历史时不渲染历史小节。
 
 
 > 测试进程设置 `GIT_CEILING_DIRECTORIES`：本机 `C:\Users\xiongyb\.git` 存在，
@@ -105,6 +141,12 @@ npm test          # 宿主半边契约测试
 `lib/client.js` 由 `scripts/build.mjs` 包装成客户端模块表要求的惰性 CJS 闭包工厂
 （`window.__ModuleLoader__.load({ id, factory })`）。仓库外的包没有可用的
 `clientBundle` 预设，所以这里复刻了该格式。
+
+**浏览器半边保持单文件**（`src/client/index.js`），两个贡献（卡片 + 状态指示器）都在其中。
+判断依据：包装器只允许**一层** `window.__ModuleLoader__.load(...)`，所以拆成多个文件就需要
+在构建脚本里再做一层模块拼接——那正是最容易出错的地方（`require` 注入、相对导入解析、
+`unwrapExports` 语义）。单文件让 `scripts/build.mjs` 保持"原样包一层"这么简单，风险最低。
+`tests/client-card.test.mjs` 里的辅助函数也依赖这一点。
 
 ### 本地开发依赖
 
