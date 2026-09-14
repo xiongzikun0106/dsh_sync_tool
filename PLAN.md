@@ -456,3 +456,40 @@ ctx.on('session/event', (session, event) => {
 
 由此确定的默认值：`direction: 'both'`、`autoCommit: true`、`onTurnEnd: true`、
 `onSessionEnd: true`、`onStartup: true`、`debounceMs: 5000`。
+
+---
+
+## 13. 实施结果与本方案的偏差（收尾记录）
+
+方案落地后与本文件最初设想不一致的地方，按「实际做法 / 原因」记录：
+
+| 最初设想 | 实际做法 | 原因 |
+|---|---|---|
+| 便携清单 `.dsh-sync.yml` | **`.dsh-sync.json`** | 避免引入 YAML 依赖（宿主半边只依赖 schemastery），JSON 自带解析 |
+| 卡片放进自建 `settings.section` | **`settings.plugin.item`**，key 为命名空间 | 官方 cookbook 的做法：与 Host 命名空间**自动配对**，且官方明确不建议跨插件值导入 |
+| 页面右上角「小按钮」 | **`conversation.session.header.utilities`** | 该插槽文档原文 "Right-aligned Session utilities in ascending order"，`header.corner` 是 `kind: 'single'` 已被占用，无法追加 |
+| 客户端→宿主用自定义 Remote 命名空间 | **settings 命名空间 + 请求令牌** | 仓库外没有生成的 Typert Remote 契约；settings 是唯一有文档的写通道 |
+| 目录选择自己实现 | **复用已挂载的 `ctx.remote.directoryPicker`** | 本机已挂 `dsh-host-directory-picker-native`；不可用时退化为手动输入绝对路径 |
+| 用 `dsh plugin add` 做开发安装 | 依赖用 `pnpm add link:`，行写在 `cordis.patch.yml` | `dsh plugin add` 会同时写进 `bundles`，而 `bundles` 只在启动时读一次 → 需要重启；走 patch 层是 **live** 的 |
+| 「启动时同步」默认开 | 默认**关**（`syncOnStartup: false`） | 启动即推送对用户过于激进 |
+
+### 真实测试发现并修复的缺陷
+
+1. **提交缺身份**（Linux 真机发现）：引擎从不提供 author/committer，任何**没配过 git 身份的机器**
+   （正是跨机流程里「第二台机器」的常态）每次自动提交都以 `Author identity unknown` 失败。
+   现改为：先用机器自身身份；**仅当** git 因缺身份拒绝时，用配置的 `commitIdentity` 或派生的
+   `dsh-sync@<hostname>` **重试一次**，并在状态里明示。真实身份永不被覆盖。
+   （commit `7aae0d9`；对照测试确保「确实先被拒绝」，不会空转通过）
+2. **ahead/behind 报告过期**（同一轮真机输出里发现）：计数在推送**之前**读取，
+   刚推送成功的区域仍报 `领先 1`。现改为推送后重读（commit `ea4ba68`）。
+3. **状态条目丢 `id`**：复用已存结果时丢掉了 schema 要求的 `id`，
+   真实 settings provider 会**拒绝整份文档并静默冻结状态**（集成测试抓到，P3 已修）。
+4. **空远端取单个 refspec**：`git fetch origin <branch>` 在远端尚无该分支时致命失败，
+   导致首次推送失败。改为取远端全部 refs（P2 已修）。
+
+### 明确未验证
+
+见 README「验证记录」表末：真实 LLM 轮次驱动 `turn/end`、需认证的 HTTPS 推送、
+浏览器里的视觉呈现、一次性任务模式下的同步（已知边界）、真实独立服务器
+（目标 VPS 的 22 端口在这条网络路径上被整体阻断，与那台机器无关）。
+
