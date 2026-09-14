@@ -128,6 +128,10 @@ test('first sync initialises the repository, commits and pushes', async () => {
     assert.equal(result.status, 'ok', result.detail)
     assert.match(result.detail, /已提交/u)
     assert.notEqual(result.head, '')
+    // The counts are re-read after the push, so a published pass reports itself
+    // level with the remote it just updated.
+    assert.equal(result.ahead, 0, 'a pass that just pushed must not report itself ahead')
+    assert.equal(result.behind, 0)
 
     // The remote actually received it.
     const remoteHead = git(world.remote, ['rev-parse', 'main']).trim()

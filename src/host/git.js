@@ -472,6 +472,25 @@ export class GitEngine {
       }
     }
 
+    // Counts read during integration predate the push, so a pass that just
+    // published would still report itself ahead of the remote it just updated.
+    // Re-read them at report time so the status the user sees is true when they
+    // see it.
+    if (remote !== '' && direction !== 'pull') {
+      const counts = await this.run({
+        cwd: area.path,
+        args: ['rev-list', '--left-right', '--count', `${remoteRef}...HEAD`],
+        env,
+        secrets,
+        signal,
+      })
+      if (counts.ok) {
+        const [remoteSide, localSide] = counts.stdout.trim().split(/\s+/u).map(Number)
+        if (Number.isFinite(remoteSide)) behind = remoteSide
+        if (Number.isFinite(localSide)) ahead = localSide
+      }
+    }
+
     const head = await this.run({ cwd: area.path, args: ['rev-parse', 'HEAD'], env, secrets, signal })
     const headSha = head.ok ? head.stdout.trim() : ''
     const parts = []
