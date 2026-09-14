@@ -12,7 +12,8 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import {
-  buildCommitMessage, GitEngine, normalizePath, pathContains, porcelainPath, scrubSecrets,
+  buildCommitMessage, GitEngine, isIdentityFailure, normalizePath, pathContains, porcelainPath,
+  resolveCommitIdentity, scrubSecrets,
 } from '../lib/git.js'
 import {
   areaFor, CONFIG, engineContext, git, installHermeticGitEnv, makeWorld,
@@ -44,6 +45,77 @@ test('pure helpers behave', () => {
   assert.equal(scrubSecrets('short', ['abc']), 'short', 'too-short secrets are not rewritten')
   const message = buildCommitMessage('dsh-sync: {host} {time} (turn {turn})', 7, new Date('2026-01-01T00:00:00Z'))
   assert.match(message, /^dsh-sync: \S+ 2026-01-01T00:00:00\.000Z \(turn 7\)$/u)
+})
+
+test('the fallback commit identity is configurable and clearly attributed', () => {
+  const derived = resolveCommitIdentity({})
+  assert.equal(derived.name, 'dsh-sync')
+  assert.match(derived.email, /^dsh-sync@\S+$/u, 'the derived identity names the tool and the machine')
+
+  assert.deepEqual(
+    resolveCommitIdentity({ commitIdentity: { name: '  Ada  ', email: '  ada@example.com  ' } }),
+    { name: 'Ada', email: 'ada@example.com' },
+    'a configured identity is trimmed and wins',
+  )
+  assert.deepEqual(
+    resolveCommitIdentity({ commitIdentity: { name: 'Ada', email: '' } }),
+    { name: 'Ada', email: derived.email },
+    'a half-configured identity keeps the derived email',
+  )
+
+  assert.equal(isIdentityFailure({ stderr: 'fatal: Author identity unknown' }), true)
+  assert.equal(isIdentityFailure({ stderr: '*** Please tell me who you are.' }), true)
+  assert.equal(isIdentityFailure({ stderr: 'fatal: not a git repository' }), false)
+  assert.equal(isIdentityFailure(undefined), false)
+})
+
+test('a machine with no git identity still commits, using the announced fallback', async () => {
+  const world = makeWorld()
+  // Strip every identity source so this reproduces a freshly provisioned
+  // machine: no GIT_AUTHOR_*, no user.name anywhere, and auto-detection refused.
+  const keys = [
+    'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'EMAIL',
+    'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
+    'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
+  ]
+  const saved = new Map(keys.map(key => [key, process.env[key]]))
+  for (const key of keys) delete process.env[key]
+  process.env.GIT_CONFIG_GLOBAL = join(world.root, 'no-such-global-gitconfig')
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+  process.env.GIT_CONFIG_COUNT = '1'
+  process.env.GIT_CONFIG_KEY_0 = 'user.useConfigOnly'
+  process.env.GIT_CONFIG_VALUE_0 = 'true'
+
+  try {
+    // Control: git itself must refuse the commit, or the test proves nothing.
+    const dry = execFileSync('git', ['-C', world.work, 'init', '-b', 'main'], { stdio: 'ignore' })
+    void dry
+    writeFileSync(join(world.work, 'a.txt'), 'hello\n')
+    execFileSync('git', ['-C', world.work, 'add', '-A'], { stdio: 'ignore' })
+    let refused = false
+    try {
+      execFileSync('git', ['-C', world.work, 'commit', '-m', 'x'], { stdio: 'ignore' })
+    } catch {
+      refused = true
+    }
+    assert.ok(refused, 'the environment really has no commit identity')
+
+    const engine = new GitEngine(engineContext())
+    const result = await engine.syncArea({ area: areaFor(world), config: CONFIG, turn: 1 })
+
+    assert.equal(result.status, 'ok', result.detail)
+    assert.match(result.detail, /回退身份 dsh-sync/u, 'the substitution is announced, not hidden')
+    assert.notEqual(result.head, '')
+
+    const author = git(world.remote, ['log', '-1', '--format=%an <%ae>']).trim()
+    assert.match(author, /^dsh-sync </u, `unexpected author: ${author}`)
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    world.cleanup()
+  }
 })
 
 test('first sync initialises the repository, commits and pushes', async () => {

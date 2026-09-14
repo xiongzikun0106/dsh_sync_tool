@@ -48,6 +48,39 @@ export function statusOf(result) {
   return result.ok ? 'ok' : (result.conflict === true ? 'conflict' : 'error')
 }
 
+/** Regex over git's stderr for the "no identity configured" family of refusals. */
+const IDENTITY_FAILURE = /Author identity unknown|Committer identity unknown|unable to auto-detect email address|empty ident name|Please tell me who you are/iu
+
+/**
+ * Whether a failed command was refused because the machine has no commit identity.
+ * @param result - a command result from {@link GitEngine.run}.
+ * @returns true when git refused for want of an author or committer.
+ */
+export function isIdentityFailure(result) {
+  return IDENTITY_FAILURE.test(String(result === undefined || result === null ? '' : result.stderr))
+}
+
+/**
+ * The identity an automatic commit falls back to when the machine has none of
+ * its own. A configured `commitIdentity` wins; otherwise a clearly attributed
+ * `dsh-sync` identity, so a commit made on a fresh machine is never anonymous.
+ * @param config - resolved plugin configuration.
+ * @returns the name and email to hand git.
+ */
+export function resolveCommitIdentity(config) {
+  const configured = config !== null && typeof config === 'object'
+    && typeof config.commitIdentity === 'object' && config.commitIdentity !== null
+    ? config.commitIdentity
+    : {}
+  const name = typeof configured.name === 'string' && configured.name.trim() !== ''
+    ? configured.name.trim()
+    : 'dsh-sync'
+  const email = typeof configured.email === 'string' && configured.email.trim() !== ''
+    ? configured.email.trim()
+    : `dsh-sync@${safeHostname()}`
+  return { name, email }
+}
+
 /** Hostname safe to embed in a commit message. */
 function safeHostname() {
   try {
@@ -143,8 +176,15 @@ export class GitEngine {
     return this.executablePath
   }
 
-  /** Build the child environment, injecting the credential as git config. */
-  buildEnvironment(area, token) {
+  /**
+   * Build the child environment, injecting the credential as git config and,
+   * when one is supplied, an explicit commit identity.
+   * @param area - the work area being synced.
+   * @param token - credential value, or undefined.
+   * @param identity - commit identity to force, or undefined to inherit the machine's.
+   * @returns the environment and the secrets to scrub from output.
+   */
+  buildEnvironment(area, token, identity) {
     const env = { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }
     const secrets = []
     if (typeof token === 'string' && token !== '') {
@@ -154,6 +194,12 @@ export class GitEngine {
       env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`
       // Both the raw token and its encoding must never surface in output.
       secrets.push(token, basic)
+    }
+    if (identity !== undefined && identity !== null) {
+      env.GIT_AUTHOR_NAME = identity.name
+      env.GIT_AUTHOR_EMAIL = identity.email
+      env.GIT_COMMITTER_NAME = identity.name
+      env.GIT_COMMITTER_EMAIL = identity.email
     }
     return { env, secrets }
   }
@@ -287,6 +333,7 @@ export class GitEngine {
 
     // 3. Commit local changes.
     let committed = false
+    let identityUsed
     if (area.autoCommit !== false) {
       const status = await this.run({ cwd: area.path, args: ['status', '--porcelain'], env, secrets, signal })
       if (!status.ok) return fail('git status 失败', status)
@@ -304,13 +351,28 @@ export class GitEngine {
         const add = await this.run({ cwd: area.path, args: ['add', '-A'], env, secrets, signal })
         if (!add.ok) return fail('git add 失败', add)
         const message = buildCommitMessage(config.commitMessageTemplate, turn)
-        const commit = await this.run({
-          cwd: area.path,
-          args: ['commit', '-m', message, '--no-verify'],
-          env,
-          secrets,
-          signal,
-        })
+        const commitArgs = ['commit', '-m', message, '--no-verify']
+        let commit = await this.run({ cwd: area.path, args: commitArgs, env, secrets, signal })
+        if (!commit.ok && isIdentityFailure(commit)) {
+          // A machine that never configured a git identity is exactly the fresh
+          // "second machine" this plugin exists to serve, so an identity refusal
+          // must not fail the whole sync. Retry once with the configured or
+          // derived identity: a real ambient identity is never overridden, and
+          // the substitution is announced rather than hidden.
+          const identity = resolveCommitIdentity(config)
+          const retry = this.buildEnvironment(area, credential, identity)
+          const second = await this.run({
+            cwd: area.path,
+            args: commitArgs,
+            env: retry.env,
+            secrets: retry.secrets,
+            signal,
+          })
+          if (second.ok) {
+            commit = second
+            identityUsed = identity
+          }
+        }
         if (!commit.ok) return fail('git commit 失败', commit)
         committed = true
       }
@@ -414,7 +476,9 @@ export class GitEngine {
     const headSha = head.ok ? head.stdout.trim() : ''
     const parts = []
     if (nestedInside !== undefined) parts.push('父仓库内独立仓库')
-    if (committed) parts.push('已提交')
+    if (committed) {
+      parts.push(identityUsed === undefined ? '已提交' : `已提交（回退身份 ${identityUsed.name}，本机未配置 git 身份）`)
+    }
     if (remote === '') parts.push('未配置远端')
     else if (direction === 'pull') parts.push('已拉取')
     else if (direction === 'push') parts.push('已推送')

@@ -144,6 +144,13 @@ fire-and-forget，拦不住进程退出。
   注入 `http.extraheader`（git 2.31+），**不进 argv、不落盘**；输出里的 token 会被替换为 `***`。
 - 新建目录会自动写入一份 `.gitignore`（`node_modules/`、`lib/`、`dist/`、`*.log`、
   `.credentials.yaml`、`settings.yaml`）。
+- **提交身份**：先用机器自身的 git 身份提交；只有当 git 因**没有身份**而拒绝
+  （`Author identity unknown` 等）时，才用配置的 `commitIdentity`，或派生的
+  `dsh-sync@<hostname>`，**重试一次**，并在状态详情里**明示**用了回退身份
+  （例：`已提交（回退身份 dsh-sync，本机未配置 git 身份）`）。
+  **真实的机器身份永远不会被覆盖。** 这条是 Linux 上真实验证时发现的：
+  跨机流程的「第二台机器」通常就是没配过 git 身份的新机器，
+  没有回退时它的第一次自动同步必然以 `Author identity unknown` 失败。
 
 
 ## 构建
@@ -226,8 +233,29 @@ pnpm dsh --profile web --dump-config    # 应出现 "# == ...profiles\web\cordis
 - **git 走 `ctx.subprocess`，不走 `ctx.shell`**：`ctx.shell` 会被沙箱化执行器包装，
   默认 `workspace-write` 下会拒绝写入会话工作区之外的目录，而 `turn/end` 钩子
   **无法申请审批**（审批要求存在打开的轮次）。
-- **token 绝不落盘、绝不进 argv**：经 `ctx.credentials` 取值，用 `GIT_ASKPASS`
-  临时脚本 + `GIT_TERMINAL_PROMPT=0` 注入；子进程环境会被剥离
-  `/KEY|PASSWORD|SECRET|TOKEN/i` 变量，所以必须显式经 `env` 传入。
+- **token 绝不落盘、绝不进 argv**：经 `ctx.credentials` 取值，用 `GIT_CONFIG_COUNT` /
+  `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` 注入 `http.extraheader`（git 2.31+ 读取环境中的
+  git 配置），配合 `GIT_TERMINAL_PROMPT=0`。子进程环境会被剥离
+  `/KEY|PASSWORD|SECRET|TOKEN/i` 变量，所以必须显式经 `env` 传入；输出里的 token 与其
+  base64 形式都会被替换为 `***`。（**不是** `GIT_ASKPASS` 临时脚本。）
 - **配置走 settings 命名空间**，卡片与 Host 通过命名空间自动配对。
 - 客户端 bundle 禁止跨插件值导入，卡片自己渲染自己的控件。
+
+## 验证记录
+
+| 环境 | 验证到什么 |
+|---|---|
+| **Windows 10/11 + Node 24** | 42/42 测试；实时 GUI 的 `__DSH_BOOT__` 含 `dsh-sync-tool` 且 `/plugins/??…/client.js` 200；`--dump-config` 行合成正确；**真实运行时**经命令通道端到端推送成功（`29bcb36 dsh-sync: xiongyb … (turn 0)`） |
+| **Debian 13 (WSL1) + Node 22** | 42/42 测试（含平台相关的 `normalizePath` / `pathContains`）；**无头 profile 挂载**（`[sync-tool] host half loaded`，无 web 栈、无浏览器半边）⇒ 宿主半边不依赖 GUI；**行 config 配置工作区域**可用；长驻 `dsh web` 下**真实推送到 bare 远端**（`2033ba8`）；**跨机导入**：克隆到 machineB 后经命令通道导入，新区域 `credentialRef` 为空、远端沿用清单 |
+| **交付物自足性** | 从 `HEAD` 全新克隆（16 个文件）+ 按 README 提供唯一运行时依赖 → 构建成功、42/42 通过 |
+
+**尚未验证（明确列出，不当作已验证）**
+
+- 用**真实 LLM 对话轮次**驱动 `turn/end` 触发同步 —— 需要 API key，未使用；
+  `turn/end` 的逻辑由测试套件（真实监听器 + 真实 git）覆盖。
+- **需要认证的 HTTPS 推送** —— 没有可用的 HTTPS 远端；只单独验证了环境变量注入
+  这条机制本身可用。
+- 卡片与状态指示器在**真实浏览器里的视觉呈现** —— 元素树与注册契约已验证，但没有浏览器。
+- **一次性任务模式**下的同步 —— 已知边界，见上。
+- 在**真实独立服务器**上运行 —— 目标 VPS 在这条网络路径上 22 端口被整体阻断
+  （三个无关境外主机同样被 RST，与那台机器无关），故改用本地 WSL。

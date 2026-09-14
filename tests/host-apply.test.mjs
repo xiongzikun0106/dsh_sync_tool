@@ -26,6 +26,7 @@ test('config resolves the documented defaults', () => {
     syncAllOnTurnEnd: false,
     debounceMs: 5000,
     commitMessageTemplate: 'dsh-sync: {host} {time} (turn {turn})',
+    commitIdentity: { name: '', email: '' },
     historyLimit: 20,
     areas: [],
     request: { token: 0, areaId: '', kind: 'none', at: 0 },

@@ -93,6 +93,15 @@ export const Config = z.object({
   debounceMs: z.natural().default(5000),
   /** Commit message template; `{host}`, `{time}` and `{turn}` are substituted. */
   commitMessageTemplate: z.string().default('dsh-sync: {host} {time} (turn {turn})'),
+  /**
+   * Identity for automatic commits, used **only** when the machine has no git
+   * identity of its own. Blank falls back to `dsh-sync@<hostname>`; set both
+   * fields to author this machine's sync commits as yourself.
+   */
+  commitIdentity: z.object({
+    name: z.string().default(''),
+    email: z.string().default(''),
+  }).default({ name: '', email: '' }),
   /** How many history entries the status namespace keeps. */
   historyLimit: z.natural().default(20),
   /** Configured work areas. */
