@@ -12,7 +12,7 @@
  * injected through the environment (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/
  * `GIT_CONFIG_VALUE_n`), which git 2.31+ reads exactly like `-c`.
  */
-import { existsSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 
@@ -262,11 +262,37 @@ export class GitEngine {
     }
   }
 
-  /** Write a default `.gitignore` into a folder that has none. */
-  ensureGitignore(cwd) {
+  /**
+   * Ensure the folder's `.gitignore` carries the built-in rules plus the area's
+   * extra patterns. Existing content is preserved and only missing lines are
+   * appended, so a sync that changes nothing does not churn the file.
+   * @param cwd - repository root.
+   * @param extraIgnores - additional patterns configured on the area.
+   * @returns true when the file changed.
+   */
+  ensureGitignore(cwd, extraIgnores = []) {
     const path = join(cwd, '.gitignore')
-    if (existsSync(path)) return false
-    writeFileSync(path, `${BUILTIN_IGNORES.join('\n')}\n`, 'utf8')
+    const extras = (Array.isArray(extraIgnores) ? extraIgnores : [])
+      .filter(entry => typeof entry === 'string' && entry.trim() !== '')
+      .map(entry => entry.trim())
+    const desired = [...BUILTIN_IGNORES, ...extras]
+
+    let existing = ''
+    try {
+      existing = readFileSync(path, 'utf8')
+    } catch {
+      existing = ''
+    }
+    const present = new Set(
+      existing.split(/\r?\n/u).map(line => line.trim()).filter(line => line !== ''),
+    )
+    const missing = desired.filter(pattern => !present.has(pattern))
+    if (existing !== '' && missing.length === 0) return false
+
+    const body = existing === ''
+      ? `${desired.join('\n')}\n`
+      : `${existing.replace(/\s+$/u, '')}\n${missing.join('\n')}\n`
+    writeFileSync(path, body, 'utf8')
     return true
   }
 
@@ -347,7 +373,7 @@ export class GitEngine {
             `检测到敏感文件，已拒绝自动提交：${sensitive.slice(0, 3).join('、')}`,
           )
         }
-        this.ensureGitignore(area.path)
+        this.ensureGitignore(area.path, area.extraIgnores)
         const add = await this.run({ cwd: area.path, args: ['add', '-A'], env, secrets, signal })
         if (!add.ok) return fail('git add 失败', add)
         const message = buildCommitMessage(config.commitMessageTemplate, turn)

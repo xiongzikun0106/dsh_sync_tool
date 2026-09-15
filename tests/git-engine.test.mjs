@@ -348,3 +348,33 @@ test('a missing remote is reported without failing the local commit', async () =
     world.cleanup()
   }
 })
+
+test('extraIgnores take effect, and the ignore file is not churned', async () => {
+  const world = makeWorld()
+  try {
+    writeFileSync(join(world.work, 'a.txt'), 'hello\n')
+    writeFileSync(join(world.work, 'scratch.tmp'), 'not for the remote\n')
+    const engine = new GitEngine(engineContext())
+    const area = areaFor(world, { extraIgnores: ['*.tmp'] })
+
+    const result = await engine.syncArea({ area, config: CONFIG, turn: 1 })
+    assert.equal(result.status, 'ok', result.detail)
+
+    const ignorePath = join(world.work, '.gitignore')
+    const written = readFileSync(ignorePath, 'utf8')
+    assert.match(written, /^\*\.tmp$/mu, 'the configured pattern is present')
+    assert.match(written, /^node_modules\/$/mu, 'the built-in rules are present too')
+
+    // The pattern is written before staging, so the file never reaches the remote.
+    const tracked = git(world.remote, ['ls-tree', '-r', '--name-only', 'main']).trim().split('\n')
+    assert.ok(!tracked.includes('scratch.tmp'), `scratch.tmp should be ignored, tree=${JSON.stringify(tracked)}`)
+
+    // A second pass must not rewrite or duplicate.
+    await engine.syncArea({ area, config: CONFIG, turn: 2 })
+    const after = readFileSync(ignorePath, 'utf8')
+    assert.equal(after, written, 'nothing missing means nothing rewritten')
+    assert.equal((after.match(/^\*\.tmp$/gmu) ?? []).length, 1, 'the pattern is not duplicated')
+  } finally {
+    world.cleanup()
+  }
+})
