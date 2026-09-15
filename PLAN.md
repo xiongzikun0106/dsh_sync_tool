@@ -28,7 +28,7 @@
 这些是方案的立足点，全部来自本机环境：
 
 **2.1 安装模型 = bundle 包 + profile**
-- 本机 profile：`C:\Users\xiongyb\.dsh\profiles\web`
+- 本机 profile：`$DSH_HOME/profiles/<profile>`
   - `package.json`：`dsh.profile.bundles = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]`，且 `patchReload: "live"`
   - `cordis.patch.yml`：用户自己的补丁层（当前为 `[]`）
   - `cordis.yml`：空根，注释明确写「Edit cordis.patch.yml, not this file」
