@@ -186,16 +186,33 @@ New-Item -ItemType Junction `
 
 ## 安装
 
-### 方式 A：作为 bundle 安装（正式路径）
+**先记住一条前提**：本包在运行时 `import` 了 `@deepseek-ai/schemastery`（`package.json` 的
+`dependencies`）。**pnpm 的 `link:` 不会安装被链接包的依赖**——所以「用目录路径直接 add」
+在干净机器上会以 `ERR_MODULE_NOT_FOUND` 失败。下面两条路各自怎么处理这一点，是本节重点。
+
+### 方式 A：正式安装（装得上依赖，需要重启）
+
+用 `file:` 明确告诉 pnpm 这是一个要**复制并解析依赖**的包（用 tarball `npm pack` 的产物
+或已发布到 registry 的包名同样可以）：
 
 ```powershell
-dsh plugin --profile web add D:\dsh_sync_tool
-# 重启 dsh web，然后刷新页面
+dsh plugin --profile web add file:D:/dsh_sync_tool
+# 然后重启 dsh web，再刷新页面
 ```
 
-`dsh plugin` 会把包链接进 profile，并因为 `package.json` 声明了 `dsh.bundle`
-而把它追加进 `dsh.profile.bundles`。**新增 bundle 需要重启**：
-`dsh.profile.bundles` 只在启动时读取一次。
+已实测：`file:` 会把包**复制**成真实目录放进
+`$DSH_HOME/profiles/<profile>/node_modules/dsh-sync-tool`，并把
+`@deepseek-ai/schemastery` hoist 到 profile 的 `node_modules`，于是包内
+`import '@deepseek-ai/schemastery'` 能解析——**真实 DSH 启动可挂载**
+（实测日志：`[sync-tool] host half loaded`）。
+
+代价：`file:` 是**复制**，改完源码要重新 `add` 一次；且包会因
+`dsh.bundle` 被追加进 `dsh.profile.bundles`，而 **`bundles` 只在启动时读一次 → 必须重启**。
+
+> 用**目录路径**而不是 `file:`（即 pnpm 的 `link:`）会得到
+> `"dsh-sync-tool": "link:..."`：包目录被符号链接，**它自己的依赖不会被安装**，
+> 宿主半边加载即失败。只有在你已经按「本地开发依赖」一节手工提供该依赖时，
+> `link:` 才可用。
 
 ### 方式 B：活补丁挂载（开发路径，无需重启）
 
@@ -215,7 +232,43 @@ cd $env:DSH_HOME\profiles\web
 pnpm add "link:D:/dsh_sync_tool"
 ```
 
-两种方式**不要同时使用**，否则同一行会被挂载两次。
+**这条路径要求你自己提供插件的运行时依赖**（见上面「本地开发依赖」一节的 junction），
+因为 `link:` 不会装它。
+
+### 两种方式不要混用
+
+方式 B 的行写在 profile 的 `cordis.patch.yml` 里，方式 A 的行来自包自带的
+`cordis.patch.yml`（经 `dsh.profile.bundles`）。**同时使用会让同一行被挂载两次**。
+本机当前用的是**方式 B**（`bundles` 里没有 `dsh-sync-tool`，行在 `cordis.patch.yml`）。
+
+### 本包 `files` 白名单的硬要求
+
+`package.json` 的 `files` 必须覆盖**全部宿主产物**。当前是：
+
+```json
+"files": ["lib/*.js", "cordis.patch.yml"]
+```
+
+这是被真实缺陷逼出来的：早先写作 `["lib/index.js", "lib/client.js", "cordis.patch.yml"]`，
+漏掉了 P2/P3 新增的 `lib/git.js` 与 `lib/portable.js`。因为 `link:` 用的是完整源码树，
+本机与 WSL 长期都没暴露；直到按 `file:` 安装才失败于
+`Cannot find module '.../lib/git.js' imported from '.../lib/index.js'`。
+**任何新增宿主模块都必须落在 `lib/*.js` 覆盖范围内。**
+
+## 检查安装是否成功
+
+```powershell
+# 1) profile 里装了什么
+Get-Content $env:DSH_HOME\profiles\web\package.json
+#    方式 A：dependencies 形如 "file:D:/dsh_sync_tool"，且 bundles 含 dsh-sync-tool
+#    方式 B：dependencies 形如 "link:D:/dsh_sync_tool"，且 bundles 不含它
+
+# 2) 合成出来的行
+cd D:\deepseek-harness-master
+pnpm dsh --profile web --dump-config    # 应出现名称为 dsh-sync-tool 的 sync-tool 行
+```
+
+启动后应看到一行日志：`[sync-tool] host half loaded (namespaces "sync-tool", "sync-tool-status")`。
 
 ## 验证
 
