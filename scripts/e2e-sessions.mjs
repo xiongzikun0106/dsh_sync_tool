@@ -1,15 +1,19 @@
 /**
  * Real-backend end-to-end check for session synchronisation.
  *
- * Unlike the unit tests, this drives the harness's own JSONL persistence
- * backend. It proves three things that a stand-in cannot:
+ * Unlike the unit tests, this drives the harness's own packages. It proves four
+ * things that a stand-in cannot:
  *
  *  1. the canonical text this plugin writes matches what the backend itself
  *     writes for an uncompressed root;
  *  2. a session exported from one root is rebuilt in a second root with the
- *     same id, header and event sequence —?through `create`/`append` only;
+ *     same id, header and event sequence — through `create`/`append` only;
  *  3. the rebuilt session is a first-class stored session there: it is listed,
- *     `stat` reports it, and a read handle returns the identical log.
+ *     `stat` reports it, and a read handle returns the identical log;
+ *  4. the device-switch notice is accepted by the real prompt registry and
+ *     rendered into the dynamic runtime-context snapshot — the channel the loop
+ *     appends after the cached history — while contributing nothing at all for
+ *     a session that did not arrive from another machine.
  *
  * Usage:
  *   node scripts/e2e-sessions.mjs [profile-root]
@@ -22,15 +26,17 @@
 import assert from 'node:assert/strict'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { installDeviceNotice, NOTICE_NAME } from '../lib/notice.js'
 import { decodeArchive, parseSessionArchive, serializeSession, SESSIONS_DIR, SessionSync } from '../lib/sessions.js'
 
-const profileRoot = process.argv[2]
-  ?? process.env.DSH_PROFILE_ROOT
-  ?? join(process.env.DSH_HOME ?? join(process.env.USERPROFILE ?? process.env.HOME ?? '', '.dsh'), 'profiles')
+const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME.trim() !== ''
+  ? process.env.DSH_HOME.trim()
+  : join(homedir(), '.dsh')
+const profileRoot = process.argv[2] ?? process.env.DSH_PROFILE_ROOT ?? join(dshHome, 'profiles')
 
 const require = createRequire(join(profileRoot, 'package.json'))
 const load = async (specifier) => import(pathToFileURL(require.resolve(specifier)).href)
@@ -118,11 +124,13 @@ function sessionEvents() {
 /** Wrap one service as the `ctx.get` this plugin's engine expects. */
 const hostOf = (service) => ({ get: (name) => (name === 'sessionPersistence' ? service : undefined) })
 
-/** Discover the single physical artifact under a root. */
+/** Discover the single logical log file under a root. */
 function onlyLogFile(root) {
   const [project] = readdirSync(root)
   const [session] = readdirSync(join(root, project))
-  const [file] = readdirSync(join(root, project, session))
+  // POSIX holds a `session.lock` file beside the log; Windows uses a kernel
+  // semaphore and leaves nothing behind.
+  const file = readdirSync(join(root, project, session)).find(name => name.includes('.jsonl'))
   return join(root, project, session, file)
 }
 
@@ -231,6 +239,37 @@ try {
   const grown = parseSessionArchive(decodeArchive(readFileSync(archivePath.replace(machineA, machineB)), 'zstd'))
   assert.equal(grown.events.length, events.length + 1, 'the second machine publishes its own continuation')
   step('a continued session is re-exported', `${grown.events.length} events`)
+
+  // ---- 6. The real prompt registry renders the device-switch notice ----
+  const SystemPrompt = (await load('@deepseek-ai/dsh-system-prompt')).default
+  const { joinContextSections, renderContextSections } = await load('@deepseek-ai/dsh-system-prompt')
+  const promptCtx = new Context()
+  await promptCtx.plugin(SystemPrompt, { includeHarnessIdentity: false })
+  const importedAt = Date.parse('2026-03-04T05:06:07Z')
+  installDeviceNotice(promptCtx, {
+    imports: () => ({ [id]: { host: 'studio-pc', at: importedAt, originalCwd: '/old/area', cwd: '/new/area', rewritten: true } }),
+    enabled: () => true,
+    archiveDir: () => '/new/area/.dsh-sessions',
+  })
+
+  const agentFor = (sessionId) => ({ session: { header: { id: sessionId } } })
+  // `ctx.inject` registers once the service is live, which is a tick after the
+  // plugin is mounted.
+  await new Promise(resolve => { setTimeout(resolve, 50) })
+  const forImported = await promptCtx.systemPrompt.assemble({ agent: agentFor(id) })
+  const rendered = renderContextSections(forImported)
+  const notice = rendered.find(entry => entry.name === NOTICE_NAME)
+  assert.ok(notice !== undefined, 'the notice is part of the dynamic runtime-context snapshot')
+  assert.match(joinContextSections(rendered), /studio-pc/u)
+  assert.match(joinContextSections(rendered), /\/old\/area/u)
+
+  const forLocal = await promptCtx.systemPrompt.assemble({ agent: agentFor('session-made-here') })
+  assert.equal(
+    renderContextSections(forLocal).some(entry => entry.name === NOTICE_NAME),
+    false,
+    'a session that started on this machine contributes nothing at all',
+  )
+  step('the prompt registry renders the notice only for imported sessions', `${rendered.length} context section(s)`)
 
   console.log(`\n${report.length} checks passed against @deepseek-ai/dsh-session-persistence-jsonl`)
 } finally {
