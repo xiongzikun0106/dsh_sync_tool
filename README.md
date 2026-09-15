@@ -436,7 +436,7 @@ Node 按**真实路径**解析依赖，所以本仓库需要一个
 
 ## 许可
 
-[MIT](./LICENSE) © 2026 xiongzikun0106
+[MIT](./LICENSE) © 2026 YuKikAzE
 
 与上游 DeepSeek Harness 保持同一许可。本插件**未内联任何第三方代码**：
 运行时只依赖 Node 内建模块、`@deepseek-ai/schemastery`（依赖，非拷贝），
