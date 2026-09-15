@@ -431,3 +431,13 @@ Node 按**真实路径**解析依赖，所以本仓库需要一个
 - **tarball / npm registry 安装** —— 只实测了 `file:` 与 `link:`。
 - **一次性任务模式**下的同步 —— 已知边界，见上。
 - **真实独立服务器** —— 未做。
+
+---
+
+## 许可
+
+[MIT](./LICENSE) © 2026 xiongzikun0106
+
+与上游 DeepSeek Harness 保持同一许可。本插件**未内联任何第三方代码**：
+运行时只依赖 Node 内建模块、`@deepseek-ai/schemastery`（依赖，非拷贝），
+以及由客户端模块表提供的 `react`。
