@@ -304,7 +304,14 @@ export class GitEngine {
    * both sides moved), then push. A rebase failure is always aborted so the
    * working tree is left as the user had it, and reported as a conflict.
    *
-   * @param options - the area, resolved config, credential value, turn number, cancellation.
+   * Two optional hooks let a caller contribute work that belongs to the same
+   * pass: `beforeCommit` runs once the repository is identified and `origin` is
+   * aligned, so anything it writes is included in this commit; `afterIntegrate`
+   * runs once the working tree holds the remote's content, so anything it reads
+   * sees what the other machine published. Neither can fail the pass.
+   *
+   * @param options - the area, resolved config, credential value, turn number,
+   *   cancellation, and the optional pass hooks.
    * @returns the area status to publish.
    */
   async syncArea(options) {
@@ -313,6 +320,21 @@ export class GitEngine {
     const branch = String(area.branch ?? 'main').trim() === '' ? 'main' : String(area.branch).trim()
     const remote = String(area.remote ?? '').trim()
     const direction = area.direction ?? 'both'
+    /** Extra status parts contributed by the pass hooks. */
+    const hookParts = []
+    const runHook = async (hook) => {
+      if (typeof hook !== 'function') return
+      try {
+        const produced = await hook(area)
+        if (Array.isArray(produced)) {
+          for (const part of produced) {
+            if (typeof part === 'string' && part !== '') hookParts.push(part)
+          }
+        }
+      } catch (error) {
+        hookParts.push(`附加步骤失败：${firstLine(error instanceof Error ? error.message : String(error))}`)
+      }
+    }
     const same = (left, right) => normalizePath(left) === normalizePath(right)
     const broken = (status, detail, extra = {}) => ({
       status,
@@ -356,6 +378,10 @@ export class GitEngine {
         if (!set.ok) return fail('更新 remote 失败', set)
       }
     }
+
+    // Anything the caller wants committed with this pass must be on disk before
+    // the status check below, so the hook runs before the commit, not after it.
+    await runHook(options.hooks?.beforeCommit)
 
     // 3. Commit local changes.
     let committed = false
@@ -484,6 +510,10 @@ export class GitEngine {
       }
     }
 
+    // The working tree now holds whatever the remote published, so a caller
+    // that derives local state from committed files reads the merged result.
+    await runHook(options.hooks?.afterIntegrate)
+
     // 5. Push.
     if (remote !== '' && direction !== 'pull') {
       const push = await this.run({
@@ -530,6 +560,7 @@ export class GitEngine {
     else parts.push('已同步')
     if (behind > 0) parts.push(`落后 ${behind}`)
     if (ahead > 0) parts.push(`领先 ${ahead}`)
+    parts.push(...hookParts)
     return broken('ok', parts.join(' · '), { head: headSha, ahead, behind })
   }
 }

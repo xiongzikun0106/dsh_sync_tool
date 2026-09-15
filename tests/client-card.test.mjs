@@ -301,6 +301,32 @@ test('add and import write the expected settings fields', async () => {
   assert.ok(request.next.token >= 1)
 })
 
+test('the session toggle writes the session block without losing its other fields', async () => {
+  const { module } = loadClientModule()
+  const configScope = stubScope({
+    enabled: true,
+    areas: [],
+    sessions: { maxSessions: 5, compression: 'none' },
+  })
+  const statusScope = stubScope({ running: false, areas: [], history: [] })
+  const { ctx, registrations } = stubClientContext(configScope, statusScope)
+  module.apply(ctx)
+
+  const card = cardOf(registrations).Component(cardOf(registrations).options.inject())
+  const toggle = findAll(expand(card), node => node.type === 'label'
+    && render(node).includes('同步会话记录'))[0]
+  assert.ok(toggle !== undefined, 'the session toggle rendered')
+  const box = findAll(toggle, node => node.type === 'input')[0]
+  assert.equal(box.props.checked, true, 'sessions default to on')
+  box.props.onChange({ target: { checked: false } })
+  await Promise.resolve()
+
+  const write = configScope.writes.find(entry => entry.field === 'sessions')
+  assert.equal(write.next.enabled, false)
+  assert.equal(write.next.maxSessions, 5, 'fields the card does not edit survive the write')
+  assert.equal(write.next.compression, 'none')
+})
+
 test('a settings snapshot that is loading still renders', () => {
   const { module } = loadClientModule()
   const configScope = stubScope(undefined, 'loading')

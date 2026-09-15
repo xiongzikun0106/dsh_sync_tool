@@ -28,9 +28,28 @@ test('config resolves the documented defaults', () => {
     commitMessageTemplate: 'dsh-sync: {host} {time} (turn {turn})',
     commitIdentity: { name: '', email: '' },
     historyLimit: 20,
+    sessions: {
+      enabled: true,
+      dir: '.dsh-sessions',
+      compression: 'zstd',
+      includeDescendants: true,
+      maxSessions: 200,
+      maxBytes: 0,
+      cwdPolicy: 'keep',
+      hintOnDeviceSwitch: true,
+      statePath: '',
+    },
     areas: [],
     request: { token: 0, areaId: '', kind: 'none', at: 0 },
   })
+})
+
+test('the session block merges field by field over its defaults', () => {
+  const resolved = Config({ sessions: { compression: 'none', cwdPolicy: 'auto' } }).sessions
+  assert.equal(resolved.compression, 'none')
+  assert.equal(resolved.cwdPolicy, 'auto')
+  assert.equal(resolved.maxSessions, 200, 'untouched fields keep their defaults')
+  assert.ok(Config({ sessions: { includeDescendants: false } }).sessions.enabled)
 })
 
 test('an area needs only id and path; the rest defaults', () => {
@@ -82,6 +101,7 @@ function stubContext() {
   const registered = []
   const disposers = []
   const listeners = new Map()
+  const contexts = []
 
   const ctx = {
     get: () => undefined,
@@ -103,8 +123,9 @@ function stubContext() {
     },
     inject(dependencies, callback) {
       injected.push(dependencies)
-      callback({
-        settings: {
+      const scoped = { ...ctx }
+      if (dependencies.includes('settings')) {
+        scoped.settings = {
           installSection(owner, namespace, schema, entry, hooks) {
             sections.push({ owner, namespace, schema, entry, hooks })
             hooks.setSource(() => ({ enabled: false, syncOnTurnEnd: false, debounceMs: 1, areas: [] }))
@@ -118,24 +139,39 @@ function stubContext() {
               replace: (next) => { registered.at(-1).value = next; return Promise.resolve() },
             }
           },
-        },
-      })
+        }
+      }
+      if (dependencies.includes('systemPrompt')) {
+        scoped.systemPrompt = {
+          context(entry) { contexts.push(entry); return () => {} },
+          section(entry) { contexts.push(entry); return () => {} },
+        }
+      }
+      callback(scoped)
     },
   }
 
-  return { ctx, injected, sections, registered, disposers, listeners }
+  return { ctx, injected, sections, registered, disposers, listeners, contexts }
 }
 
 test('apply registers the config section and the status namespace', () => {
-  const { ctx, injected, sections, registered, disposers, listeners } = stubContext()
+  const { ctx, injected, sections, registered, disposers, listeners, contexts } = stubContext()
 
   const entry = Config({})
   apply(ctx, entry)
 
-  assert.deepEqual(injected, [['settings']], 'the settings service is read optionally, via ctx.inject')
+  assert.deepEqual(
+    injected.map((entry) => entry[0]).sort(),
+    ['settings', 'systemPrompt'],
+    'every service is read optionally, via ctx.inject',
+  )
 
   assert.ok(listeners.has('session/event'), 'the turn-boundary hook is registered on the fiber')
   assert.equal(listeners.get('session/event').length, 1)
+
+  assert.equal(contexts.length, 1, 'the device notice is one conditional runtime-context contribution')
+  assert.equal(contexts[0].name, 'sync-tool:device-switch')
+  assert.equal(typeof contexts[0].text, 'function')
 
   assert.equal(sections.length, 1)
   const [section] = sections
@@ -155,8 +191,16 @@ test('apply registers the config section and the status namespace', () => {
   assert.equal(registered[0].value.running, false)
   assert.deepEqual(registered[0].value.areas, [])
 
-  assert.equal(disposers.length, 1, 'a drain disposer is registered on the fiber')
+  assert.equal(disposers.length, 2, 'the drain and the notice registration both live on the fiber')
   assert.equal(typeof disposers[0], 'function')
+})
+
+test('the notice stays silent for a session this machine did not import', () => {
+  const { ctx, contexts } = stubContext()
+  apply(ctx, Config({}))
+  const [notice] = contexts
+  assert.equal(notice.text({ agent: undefined }), '')
+  assert.equal(notice.text({ agent: { session: { header: { id: 'session-x' } } } }), '')
 })
 
 test('apply stays inert when no settings provider is composed', () => {

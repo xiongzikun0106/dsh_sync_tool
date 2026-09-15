@@ -46,9 +46,10 @@ function stubHostContext(subprocess) {
       }
       return () => {}
     },
-    inject(_dependencies, callback) {
-      callback({
-        settings: {
+    inject(dependencies, callback) {
+      const scoped = { ...ctx }
+      if (dependencies.includes('settings')) {
+        scoped.settings = {
           installSection(_owner, _namespace, _schema, _entry, hooks) {
             hooks.setSource(() => state.config)
             hooks.onChange()
@@ -59,8 +60,14 @@ function stubHostContext(subprocess) {
               replace: (next) => { state.status = next; return Promise.resolve() },
             }
           },
-        },
-      })
+        }
+      }
+      if (dependencies.includes('systemPrompt')) {
+        // The device notice registers one conditional runtime-context
+        // contribution; these tests exercise the git side of the pass.
+        scoped.systemPrompt = { context: () => () => {} }
+      }
+      callback(scoped)
     },
   }
 

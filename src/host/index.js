@@ -13,7 +13,9 @@
  *
  * Settings is also the command channel: an out-of-tree plugin has no generated
  * Remote namespace, so the card bumps `request.token` and this half watches the
- * committed value. The git engine lives in `./git.js`.
+ * committed value. The git engine lives in `./git.js`; session records are
+ * exported into and imported from the work area by `./sessions.js`, and the
+ * device-switch notice model-side lives in `./notice.js`.
  */
 import { statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
@@ -21,7 +23,9 @@ import { isAbsolute } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import { buildCommitMessage, GitEngine, normalizePath, pathContains } from './git.js'
+import { installDeviceNotice } from './notice.js'
 import { areaFromManifest, baseName, MANIFEST_NAME, readManifest, writeManifest } from './portable.js'
+import { archiveDir, COMPRESSIONS, CWD_POLICIES, SESSIONS_DIR, SessionSync } from './sessions.js'
 
 /** Cordis plugin name (the loader row's `name` is the module specifier). */
 export const name = 'sync-tool'
@@ -74,6 +78,48 @@ const AreaSchema = z.object({
 })
 
 /**
+ * Session-record synchronisation, layered under the same master switch.
+ *
+ * `cwdPolicy` defaults to `keep` on purpose: the shipped presets render
+ * `{{cwd}}` into the system prompt, so rewriting the recorded working directory
+ * would change surface node 0 and drop the provider's prefix cache from the
+ * first token. Keeping it means an imported session continues exactly where the
+ * other machine left off, as long as the work area uses the same absolute path.
+ */
+const SessionsSchema = z.object({
+  /** Whether sessions travel with the work area. */
+  enabled: z.boolean().default(true),
+  /** Subdirectory of the work area that holds the archives. */
+  dir: z.string().default(SESSIONS_DIR),
+  /** Archive encoding: compact `zstd`, or `none` for reviewable plain text. */
+  compression: z.union([...COMPRESSIONS]).default('zstd'),
+  /** Include sessions whose working directory is a subdirectory of the area. */
+  includeDescendants: z.boolean().default(true),
+  /** Per area, how many of the newest in-scope sessions to synchronise. */
+  maxSessions: z.natural().default(200),
+  /** Skip a single archive larger than this many bytes; 0 means no limit. */
+  maxBytes: z.natural().default(0),
+  /** What to do when the recorded working directory does not exist here. */
+  cwdPolicy: z.union([...CWD_POLICIES]).default('keep'),
+  /** Tell the model, invisibly, that this session came from another machine. */
+  hintOnDeviceSwitch: z.boolean().default(true),
+  /** Machine-local bookkeeping file; empty uses `$DSH_HOME/sync-tool/sessions.json`. */
+  statePath: z.string().default(''),
+})
+
+const SESSION_DEFAULTS = {
+  enabled: true,
+  dir: SESSIONS_DIR,
+  compression: 'zstd',
+  includeDescendants: true,
+  maxSessions: 200,
+  maxBytes: 0,
+  cwdPolicy: 'keep',
+  hintOnDeviceSwitch: true,
+  statePath: '',
+}
+
+/**
  * Resolved configuration, layered as schema defaults, then the composition
  * row's `config`, then the user document section.
  */
@@ -104,6 +150,8 @@ export const Config = z.object({
   }).default({ name: '', email: '' }),
   /** How many history entries the status namespace keeps. */
   historyLimit: z.natural().default(20),
+  /** Session-record synchronisation. */
+  sessions: SessionsSchema.default(SESSION_DEFAULTS),
   /** Configured work areas. */
   areas: z.array(AreaSchema).default([]),
   /**
@@ -184,6 +232,7 @@ export function apply(ctx, config) {
   const runtime = {
     running: false,
     areas: new Map(),
+    sessions: new Map(),
     history: [],
     revision: 0,
     statusScope: undefined,
@@ -192,6 +241,9 @@ export function apply(ctx, config) {
   }
 
   const engine = new GitEngine(ctx, { log: () => {} })
+
+  /** Session archive engine: one machine-local state file, shared by both halves. */
+  const sessionSync = new SessionSync(ctx, { log: () => {} })
 
   /** Serialize every pass: one git sequence at a time, globally. */
   let queue = Promise.resolve()
@@ -203,6 +255,50 @@ export function apply(ctx, config) {
     const current = resolveConfig() ?? {}
     return Array.isArray(current.areas) ? current.areas : []
   }
+
+  /** Read the resolved session-synchronisation block. */
+  const sessionConfig = () => {
+    const block = (resolveConfig() ?? {}).sessions
+    return block !== null && typeof block === 'object' ? block : {}
+  }
+
+  /**
+   * One session step of a sync pass. It never throws: a session problem must
+   * not be able to fail the git pass it rides along with.
+   * @param kind - `export` before the commit, `import` after the merge.
+   * @param area - the work area being synced.
+   * @param signal - the pass cancellation.
+   * @returns status fragments to append to the area detail.
+   */
+  const runSessionStep = async (kind, area, signal) => {
+    const config = sessionConfig()
+    if (config.enabled === false) return []
+    const summary = kind === 'export'
+      ? await sessionSync.exportArea(area, config, signal)
+      : await sessionSync.importArea(area, config, signal)
+    const entry = runtime.sessions.get(area.id) ?? { notes: [], at: 0 }
+    if (Array.isArray(summary.notes)) entry.notes.push(...summary.notes)
+    entry.at = Date.now()
+    runtime.sessions.set(area.id, entry)
+    const parts = []
+    if (kind === 'export' && summary.exported > 0) parts.push(`会话↑${summary.exported}`)
+    if (kind === 'import' && summary.imported > 0) parts.push(`会话↓${summary.imported}`)
+    if (kind === 'import' && summary.appended > 0) parts.push(`会话并入${summary.appended}`)
+    if (summary.conflicts > 0) parts.push(`会话冲突${summary.conflicts}`)
+    if (summary.failed > 0) parts.push(`会话失败${summary.failed}`)
+    return parts
+  }
+
+  // The device-switch notice reads the import records this machine keeps, so it
+  // is registered once, globally, and decides per assembled session.
+  installDeviceNotice(ctx, {
+    imports: () => sessionSync.imports(),
+    enabled: () => sessionConfig().hintOnDeviceSwitch !== false,
+    archiveDir: (record) => {
+      const area = configuredAreas().find(candidate => candidate.id === record?.areaId)
+      return area === undefined ? '' : archiveDir(area.path, sessionConfig().dir)
+    },
+  })
 
   /** Compute and write the status document. */
   const publish = () => {
@@ -289,6 +385,7 @@ export function apply(ctx, config) {
         }
 
         const credential = await resolveCredential(area.credentialRef)
+        runtime.sessions.delete(area.id)
         let result
         try {
           result = await engine.syncArea({
@@ -297,6 +394,13 @@ export function apply(ctx, config) {
             credential,
             turn: options.turn ?? 0,
             signal: options.signal,
+            // Session records travel with the folder: they are written before
+            // the commit so they are published by it, and read after the merge
+            // so they see what the other machine published.
+            hooks: {
+              beforeCommit: (target) => runSessionStep('export', target, options.signal),
+              afterIntegrate: (target) => runSessionStep('import', target, options.signal),
+            },
           })
         } catch (error) {
           result = {
@@ -312,11 +416,12 @@ export function apply(ctx, config) {
         const value = { ...result, id: area.id, at: Date.now() }
         runtime.areas.set(area.id, value)
         const name = area.name !== undefined && area.name !== '' ? area.name : area.path
+        const sessionNotes = runtime.sessions.get(area.id)?.notes ?? []
         runtime.history.push({
           at: value.at,
           areaId: area.id,
           ok: value.status === 'ok',
-          summary: `${name} · ${value.detail}`,
+          summary: `${name} · ${value.detail}${sessionNotes.length === 0 ? '' : ` · ${sessionNotes.slice(0, 2).join('；')}`}`,
         })
         publish()
       }
@@ -473,7 +578,7 @@ export function apply(ctx, config) {
     }
   })
 
-  console.log(`[sync-tool] host half loaded (namespaces "${SYNC_NAMESPACE}", "${STATUS_NAMESPACE}")`)
+  console.log(`[sync-tool] host half loaded (namespaces "${SYNC_NAMESPACE}", "${STATUS_NAMESPACE}", sessions -> "${sessionSync.state.path}")`)
 }
 
-export { buildCommitMessage, GitEngine }
+export { buildCommitMessage, GitEngine, SessionSync }

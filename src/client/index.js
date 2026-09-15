@@ -470,6 +470,7 @@ function SyncCard(props) {
 
   const value = config.value ?? {}
   const areas = Array.isArray(value.areas) ? value.areas : []
+  const sessions = value.sessions !== null && typeof value.sessions === 'object' ? value.sessions : {}
   const statusValue = status.value ?? {}
   const statusById = new Map(
     (Array.isArray(statusValue.areas) ? statusValue.areas : []).map(entry => [entry.id, entry]),
@@ -600,6 +601,13 @@ function SyncCard(props) {
         checked: value.syncAllOnTurnEnd === true,
         disabled: !writable,
         onChange: (next) => { void write('syncAllOnTurnEnd', next) },
+      }),
+      Checkbox({
+        label: '同步会话记录',
+        title: '把工作区域内的会话记录写进该目录的 .dsh-sessions/，并在另一台机器上还原成可继续对话的原生会话',
+        checked: sessions.enabled !== false,
+        disabled: !writable,
+        onChange: (next) => { void write('sessions', { ...sessions, enabled: next }) },
       }),
       React.createElement(
         'label',

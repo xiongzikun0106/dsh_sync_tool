@@ -144,8 +144,80 @@ test('first sync initialises the repository, commits and pushes', async () => {
   }
 })
 
-test('a second pass with no changes is a no-op, not a failure', async () => {
+test('pass hooks write before the commit and read after the merge', async () => {
   const world = makeWorld()
+  try {
+    const engine = new GitEngine(engineContext())
+    writeFileSync(join(world.work, 'from-a.txt'), 'a\n')
+    await engine.syncArea({ area: areaFor(world), config: CONFIG, turn: 1 })
+
+    // The second machine starts from what the first one published.
+    const second = join(world.root, 'work-b')
+    mkdirSync(second, { recursive: true })
+    execFileSync('git', ['clone', world.remote, second], { stdio: 'ignore' })
+    writeFileSync(join(world.work, 'from-a.txt'), 'a-changed-on-a\n')
+
+    const order = []
+    await engine.syncArea({
+      area: areaFor(world),
+      config: CONFIG,
+      turn: 2,
+      hooks: {
+        beforeCommit: (area) => {
+          // Written here, so this very commit publishes it.
+          writeFileSync(join(area.path, 'collected.txt'), 'session archive\n')
+          order.push('beforeCommit')
+        },
+        afterIntegrate: () => { order.push('afterIntegrate') },
+      },
+    })
+    assert.deepEqual(order, ['beforeCommit', 'afterIntegrate'])
+    assert.match(
+      git(world.remote, ['show', 'main:collected.txt']),
+      /session archive/u,
+      'what beforeCommit writes reaches the remote in the same pass',
+    )
+
+    let seen
+    await engine.syncArea({
+      area: areaFor(world, { id: 'a2', path: second }),
+      config: CONFIG,
+      turn: 3,
+      hooks: { afterIntegrate: (area) => { seen = readFileSync(join(area.path, 'from-a.txt'), 'utf8') } },
+    })
+    assert.equal(
+      (seen ?? '').replace(/\r\n/gu, '\n'),
+      'a-changed-on-a\n',
+      'afterIntegrate runs once the working tree holds the merged content',
+    )
+  } finally {
+    world.cleanup()
+  }
+})
+
+test('a throwing pass hook is reported and never fails the git pass', async () => {
+  const world = makeWorld()
+  try {
+    writeFileSync(join(world.work, 'a.txt'), 'hello\n')
+    const engine = new GitEngine(engineContext())
+    const result = await engine.syncArea({
+      area: areaFor(world),
+      config: CONFIG,
+      turn: 1,
+      hooks: {
+        beforeCommit: () => { throw new Error('session store exploded') },
+        afterIntegrate: () => ['会话↓1'],
+      },
+    })
+    assert.equal(result.status, 'ok')
+    assert.match(result.detail, /附加步骤失败：session store exploded/u)
+    assert.match(result.detail, /会话↓1/u, 'a hook that returns fragments contributes them to the status')
+  } finally {
+    world.cleanup()
+  }
+})
+
+test('a second pass with no changes is a no-op, not a failure', async () => {  const world = makeWorld()
   try {
     writeFileSync(join(world.work, 'a.txt'), 'hello\n')
     const engine = new GitEngine(engineContext())
