@@ -50,61 +50,12 @@ function header(overrides = {}) {
 }
 
 /**
- * An in-memory `sessionPersistence` stand-in that keeps the documented
- * invariants: appends must be contiguous, `create` refuses a live id, and every
- * mutation moves the opaque revision.
+ * An in-memory `sessionPersistence` stand-in lives in `helpers.mjs`, shared
+ * with the pass-level suites: more than one of them needs a backend that keeps
+ * the documented invariants.
  */
-export function fakePersistence(initial = []) {
-  const store = new Map()
-  const handles = []
-  let counter = 0
-  const stamp = (record) => { record.revision = `r${++counter}` }
-  for (const entry of initial) {
-    const record = { header: structuredClone(entry.header), events: structuredClone(entry.events) }
-    stamp(record)
-    store.set(record.header.id, record)
-  }
-  const snapshot = (record) => ({ header: structuredClone(record.header), revision: record.revision })
-  const view = (record) => ({
-    id: record.header.id,
-    get header() { return structuredClone(record.header) },
-    async read() { return { events: structuredClone(record.events) } },
-    async append(events) {
-      const base = record.events.length
-      for (const [index, item] of events.entries()) {
-        assert.equal(item.seq, base + index, 'append must be contiguous with the stored log')
-      }
-      for (const item of events) record.events.push(structuredClone(item))
-      stamp(record)
-    },
-    async flush() {},
-    async close() {},
-  })
-  return {
-    store,
-    handles,
-    async list() { return [...store.values()].map(snapshot) },
-    async stat(id) { const record = store.get(id); return record === undefined ? undefined : snapshot(record) },
-    async open(id, access) {
-      const record = store.get(id)
-      if (record === undefined) throw new Error(`session "${id}" not found`)
-      const handle = view(record)
-      handles.push({ id, access })
-      return handle
-    },
-    async create(created, options = {}) {
-      if (store.has(created.id)) throw new Error(`session "${created.id}" already exists`)
-      assert.equal(created.version, 3, 'create requires the current logical version')
-      if (created.isSeeded === true) {
-        assert.ok(Number.isSafeInteger(options.inheritedEventCount), 'a seeded create requires its cut')
-      }
-      const record = { header: structuredClone(created), events: [] }
-      stamp(record)
-      store.set(created.id, record)
-      return view(record)
-    },
-  }
-}
+import { fakePersistence } from './helpers.mjs'
+
 
 /** A scratch area plus a machine-local state file. */
 function scratch(t) {
@@ -456,12 +407,17 @@ test('the instance list is the only thing that decides scope', async (t) => {
   ])
   const sync = syncFor(backend, world.statePath)
   const summary = await sync.exportArea(world.area, {})
-  assert.equal(summary.exported, 1)
+  assert.equal(summary.exported, 0, 'a session started in a subdirectory is another workspace, not this one')
   assert.equal(summary.skipped, 0, 'a session with no cwd is simply out of scope, not an error')
 
-  const excluded = await syncFor(backend, join(world.root, 'state', 'flat.json'))
-    .exportArea(world.area, { includeDescendants: false })
-  assert.equal(excluded.exported, 0)
+  // The Harness itself is the authority on membership: an id it accounts to
+  // this workspace is exported even when the working directory says otherwise.
+  const member = await sync.exportArea(world.area, {}, undefined, { members: ['session-nowhere'] })
+  assert.equal(member.exported, 1)
+
+  const optedIn = await syncFor(backend, join(world.root, 'state', 'deep.json'))
+    .exportArea(world.area, { includeDescendants: true })
+  assert.equal(optedIn.exported, 1, 'descendants are available, but only on request')
 })
 
 test('state survives a restart and drops records for vanished sessions', async (t) => {

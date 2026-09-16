@@ -16,7 +16,8 @@ import {
 /** A fully populated area, including the machine-local fields. */
 const AREA = {
   id: 'a1',
-  name: 'My Plugins',
+  title: 'My Plugins',
+  mode: 'folder',
   path: 'D:/work/plugins',
   remote: 'https://example.invalid/me/dsh-sync.git',
   branch: 'trunk',
@@ -33,6 +34,7 @@ test('the manifest carries only machine-independent facts', () => {
   const manifest = manifestFor(AREA)
   assert.deepEqual(manifest, {
     version: 1,
+    mode: 'folder',
     name: 'My Plugins',
     remote: 'https://example.invalid/me/dsh-sync.git',
     branch: 'trunk',
@@ -95,7 +97,8 @@ test('an imported area falls back to its folder name and defaults', () => {
   assert.equal(area.branch, 'main')
   assert.equal(area.direction, 'both')
   assert.equal(area.enabled, true)
-  assert.equal(area.nestedRepos, 'init')
+  assert.equal(area.nestedRepos, 'refuse')
+  assert.equal(area.mode, 'folder')
   assert.equal(area.remote, '')
   assert.equal(baseName('E:/elsewhere/my-plugins/'), 'my-plugins')
   assert.equal(baseName('D:\\work\\plugins'), 'plugins')

@@ -14,7 +14,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 
 /** Ignore rules written into a folder that has no `.gitignore` yet. */
 export const BUILTIN_IGNORES = Object.freeze([
@@ -205,6 +205,93 @@ export class GitEngine {
   }
 
   /**
+   * Describe the repository state around one folder without changing anything.
+   *
+   * The browser cannot run git, so this is what lets the configuration panel
+   * tell a plain directory from an existing project repository before the user
+   * decides anything. It never writes: no init, no remote, no commit.
+   *
+   * @param path - the folder to inspect.
+   * @param options - `{ credential, signal }`.
+   * @returns `{ kind, root, remote, branch, dirty }`; `kind` is `none` for a
+   *   plain directory, `repo` when the folder itself is the repository root,
+   *   and `nested` when it sits inside someone else's checkout.
+   */
+  async probe(path, options = {}) {
+    const { env, secrets } = this.buildEnvironment({ path, remote: '', branch: 'main', credentialRef: '' }, options.credential)
+    const signal = options.signal
+    const idle = { kind: 'none', root: '', remote: '', branch: '', dirty: 0 }
+    let top
+    try {
+      top = await this.run({ cwd: path, args: ['rev-parse', '--show-toplevel'], env, secrets, signal })
+    } catch {
+      return idle
+    }
+    if (!top.ok) return idle
+    const root = top.stdout.trim()
+    if (root === '') return idle
+
+    const remote = await this.run({ cwd: path, args: ['remote', 'get-url', 'origin'], env, secrets, signal })
+    const branch = await this.run({ cwd: path, args: ['rev-parse', '--abbrev-ref', 'HEAD'], env, secrets, signal })
+    const status = await this.run({ cwd: path, args: ['status', '--porcelain'], env, secrets, signal })
+    const branchName = firstLine(branch.stdout)
+    return {
+      kind: normalizePath(root) === normalizePath(path) ? 'repo' : 'nested',
+      root,
+      remote: firstLine(remote.stdout),
+      // An unborn branch reports the literal "HEAD"; treat that as no branch.
+      branch: branchName === 'HEAD' ? '' : branchName,
+      dirty: status.ok
+        ? status.stdout.split('\n').filter(line => line.trim() !== '').length
+        : 0,
+    }
+  }
+
+  /**
+   * Keep a pattern out of `git status` without touching a tracked file.
+   *
+   * `.git/info/exclude` is the repository's own private ignore list: it is never
+   * committed, never pushed, and never shows up as a change the user has to
+   * explain. That is exactly what the session archive needs when the plugin is a
+   * guest in somebody else's repository — the folder must not appear as
+   * untracked, or a later `git add -A` would commit the conversations into a
+   * project that has nothing to do with them.
+   *
+   * The path is resolved through `git rev-parse --git-path`, so worktrees and
+   * submodules (where `.git` is a file pointing elsewhere) are handled too.
+   *
+   * @param cwd - any directory inside the repository.
+   * @param patterns - ignore patterns to ensure, verbatim.
+   * @param env - child environment.
+   * @param secrets - values to scrub.
+   * @param signal - cancellation.
+   * @returns the file written, or undefined when nothing was needed.
+   */
+  async ensureLocalExclude(cwd, patterns, env, secrets, signal) {
+    const wanted = patterns.filter(pattern => typeof pattern === 'string' && pattern !== '')
+    if (wanted.length === 0) return undefined
+    const resolved = await this.run({
+      cwd, args: ['rev-parse', '--git-path', 'info/exclude'], env, secrets, signal,
+    })
+    if (!resolved.ok) return undefined
+    const reported = firstLine(resolved.stdout)
+    if (reported === '') return undefined
+    const target = isAbsolute(reported) ? reported : join(cwd, reported)
+    let existing = ''
+    try {
+      existing = readFileSync(target, 'utf8')
+    } catch {
+      existing = ''
+    }
+    const lines = existing.split('\n').map(line => line.trimEnd())
+    const missing = wanted.filter(pattern => !lines.includes(pattern))
+    if (missing.length === 0) return undefined
+    const prefix = existing === '' || existing.endsWith('\n') ? existing : `${existing}\n`
+    writeFileSync(target, `${prefix}${missing.join('\n')}\n`, 'utf8')
+    return target
+  }
+
+  /**
    * Run one git command.
    * @param options - working directory, arguments, environment, secrets, cancellation, deadline.
    * @returns exit code, whether it succeeded, and scrubbed stdout/stderr.
@@ -356,7 +443,7 @@ export class GitEngine {
       const init = await this.run({ cwd: area.path, args: ['init', '-b', branch], env, secrets, signal })
       if (!init.ok) return fail('git init 失败', init)
     } else if (!same(toplevel.stdout, area.path)) {
-      if ((area.nestedRepos ?? 'init') === 'refuse') {
+      if ((area.nestedRepos ?? 'refuse') === 'refuse') {
         return broken(
           'error',
           `该目录位于另一个 git 仓库内部（仓库根：${toplevel.stdout.trim()}），已按配置拒绝操作`,
@@ -384,10 +471,17 @@ export class GitEngine {
     await runHook(options.hooks?.beforeCommit)
 
     // 3. Commit local changes.
+    //
+    // `area.commitPaths` narrows the commit to those paths. That is what lets
+    // the plugin live inside a repository the user already owns: the pass
+    // publishes the session archive and leaves every other working-tree change
+    // exactly as it found it, including anything the user staged themselves.
     let committed = false
     let identityUsed
+    const scope = Array.isArray(area.commitPaths) && area.commitPaths.length > 0 ? area.commitPaths : undefined
+    const scoped = (args) => (scope === undefined ? args : [...args, '--', ...scope])
     if (area.autoCommit !== false) {
-      const status = await this.run({ cwd: area.path, args: ['status', '--porcelain'], env, secrets, signal })
+      const status = await this.run({ cwd: area.path, args: scoped(['status', '--porcelain']), env, secrets, signal })
       if (!status.ok) return fail('git status 失败', status)
       const lines = status.stdout.split('\n').map(line => line.trimEnd()).filter(line => line !== '')
       if (lines.length > 0) {
@@ -400,10 +494,10 @@ export class GitEngine {
           )
         }
         this.ensureGitignore(area.path, area.extraIgnores)
-        const add = await this.run({ cwd: area.path, args: ['add', '-A'], env, secrets, signal })
+        const add = await this.run({ cwd: area.path, args: scoped(['add', '-A']), env, secrets, signal })
         if (!add.ok) return fail('git add 失败', add)
         const message = buildCommitMessage(config.commitMessageTemplate, turn)
-        const commitArgs = ['commit', '-m', message, '--no-verify']
+        const commitArgs = scoped(['commit', '-m', message, '--no-verify'])
         let commit = await this.run({ cwd: area.path, args: commitArgs, env, secrets, signal })
         if (!commit.ok && isIdentityFailure(commit)) {
           // A machine that never configured a git identity is exactly the fresh

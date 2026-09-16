@@ -21,6 +21,126 @@ import {
 
 installHermeticGitEnv()
 
+test('probe describes a folder without changing it', async () => {
+  const world = makeWorld()
+  try {
+    const engine = new GitEngine(engineContext())
+
+    // A plain directory: no repository, and nothing is created by asking.
+    const plain = await engine.probe(world.work)
+    assert.deepEqual(plain, { kind: 'none', root: '', remote: '', branch: '', dirty: 0 })
+    assert.equal(existsSync(join(world.work, '.git')), false, 'probing never initialises')
+
+    // A folder inside someone else's checkout is reported as nested, with the
+    // enclosing root, so the caller can refuse to start a second repository there.
+    mkdirSync(world.work, { recursive: true })
+    git(world.work, ['init', '-b', 'main'])
+    writeFileSync(join(world.work, 'committed.txt'), 'x\n')
+    git(world.work, ['add', '-A'])
+    git(world.work, ['commit', '-m', 'first'])
+    const inside = await engine.probe(world.work)
+    assert.equal(inside.kind, 'repo')
+    assert.equal(inside.branch, 'main')
+    assert.equal(inside.dirty, 0)
+
+    writeFileSync(join(world.work, 'wip.txt'), 'uncommitted\n')
+    const dirty = await engine.probe(world.work)
+    assert.equal(dirty.dirty, 1, 'uncommitted work is reported, not touched')
+
+    const sub = join(world.work, 'sub')
+    mkdirSync(sub, { recursive: true })
+    const nested = await engine.probe(sub)
+    assert.equal(nested.kind, 'nested')
+    assert.equal(normalizePath(nested.root), normalizePath(world.work))
+  } finally {
+    world.cleanup()
+  }
+})
+
+test('a scoped commit publishes only the named paths', async () => {
+  const world = makeWorld()
+  try {
+    const engine = new GitEngine(engineContext())
+    writeFileSync(join(world.work, 'code.txt'), 'the project\n')
+    assert.equal((await engine.syncArea({ area: areaFor(world), config: CONFIG, turn: 1 })).status, 'ok')
+
+    // The user stages their own work, then the plugin publishes the archive.
+    mkdirSync(join(world.work, '.dsh-sessions'), { recursive: true })
+    writeFileSync(join(world.work, '.dsh-sessions', 'session-x.jsonl'), '{}\n')
+    writeFileSync(join(world.work, 'unfinished.txt'), 'not ready\n')
+    git(world.work, ['add', 'unfinished.txt'])
+
+    const result = await engine.syncArea({
+      area: areaFor(world, { commitPaths: ['.dsh-sessions'] }),
+      config: CONFIG,
+      turn: 2,
+    })
+    assert.equal(result.status, 'ok', result.detail)
+
+    const published = git(world.remote, ['ls-tree', '-r', '--name-only', 'main'])
+    assert.match(published, /\.dsh-sessions\/session-x\.jsonl/u, 'the archive was published')
+    assert.equal(published.includes('unfinished.txt'), false, 'the user\'s staged work was not committed')
+    assert.equal(
+      git(world.work, ['diff', '--cached', '--name-only']).trim(),
+      'unfinished.txt',
+      'their staged change is exactly as they left it',
+    )
+  } finally {
+    world.cleanup()
+  }
+})
+
+test('the default refuses to nest a repository inside another checkout', async () => {
+  const world = makeWorld()
+  try {
+    const outer = join(world.root, 'outer')
+    mkdirSync(outer, { recursive: true })
+    git(outer, ['init', '-b', 'main'])
+    const inner = join(outer, 'inner')
+    mkdirSync(inner, { recursive: true })
+    writeFileSync(join(inner, 'a.txt'), 'hello\n')
+
+    const engine = new GitEngine(engineContext())
+    const { nestedRepos, ...area } = areaFor(world, { path: inner })
+    void nestedRepos
+    const result = await engine.syncArea({ area, config: CONFIG, turn: 1 })
+    assert.equal(result.status, 'error')
+    assert.match(result.detail, /位于另一个 git 仓库内部/u)
+    assert.equal(existsSync(join(inner, '.git')), false, 'no stray repository was created')
+  } finally {
+    world.cleanup()
+  }
+})
+
+test('the private exclude list hides a path without touching a tracked file', async () => {
+  const world = makeWorld()
+  try {
+    git(world.work, ['init', '-b', 'main'])
+    writeFileSync(join(world.work, 'committed.txt'), 'x\n')
+    git(world.work, ['add', '-A'])
+    git(world.work, ['commit', '-m', 'first'])
+    mkdirSync(join(world.work, '.dsh-sessions'), { recursive: true })
+    writeFileSync(join(world.work, '.dsh-sessions', 'session-y.jsonl'), '{}\n')
+
+    const engine = new GitEngine(engineContext())
+    assert.match(git(world.work, ['status', '--porcelain']), /\.dsh-sessions/u)
+
+    const { env, secrets } = engine.buildEnvironment(areaFor(world))
+    const written = await engine.ensureLocalExclude(world.work, ['.dsh-sessions/'], env, secrets)
+    assert.ok(written !== undefined)
+    assert.equal(git(world.work, ['status', '--porcelain']).trim(), '', 'the folder is no longer untracked')
+    assert.equal(existsSync(join(world.work, '.gitignore')), false, 'no tracked file appeared')
+
+    // Idempotent: a second pass adds nothing.
+    assert.equal(await engine.ensureLocalExclude(world.work, ['.dsh-sessions/'], env, secrets), undefined)
+    const exclude = readFileSync(join(world.work, '.git', 'info', 'exclude'), 'utf8')
+    assert.equal(exclude.trimEnd().split('\n').at(-1), '.dsh-sessions/')
+    assert.equal(exclude.split('\n').filter(line => line === '.dsh-sessions/').length, 1)
+  } finally {
+    world.cleanup()
+  }
+})
+
 test('pure helpers behave', () => {
   // Case folding is Windows-only: a POSIX filesystem is case sensitive, so the
   // same input must NOT be folded there.

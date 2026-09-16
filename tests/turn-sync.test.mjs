@@ -26,7 +26,7 @@ function stubHostContext(subprocess) {
   const disposers = []
   const state = {
     config: { areas: [] },
-    status: { revision: 0, running: false, updatedAt: 0, areas: [], history: [] },
+    status: { revision: 0, running: false, updatedAt: 0, workspaces: [], probes: [], history: [] },
   }
 
   const ctx = {
@@ -105,8 +105,9 @@ test('a finished turn inside an area syncs that area', async () => {
     const settled = await waitFor(() => host.state.status.history.length > 0)
     assert.ok(settled, 'the turn boundary produced a sync pass')
 
-    const [area] = host.state.status.areas
-    assert.equal(area.id, 'a1')
+    const [area] = host.state.status.workspaces
+    assert.equal(area.path, world.work)
+    assert.equal(area.mode, 'folder', 'a plain directory syncs in place')
     assert.equal(area.status, 'ok', area.detail)
     assert.notEqual(area.head, '')
 
@@ -160,7 +161,7 @@ test('syncAllOnTurnEnd makes an unrelated turn sync every enabled area', async (
 
     const settled = await waitFor(() => host.state.status.history.length > 0)
     assert.ok(settled, 'the unrelated turn still synced')
-    assert.equal(host.state.status.areas[0].status, 'ok')
+    assert.equal(host.state.status.workspaces[0].status, 'ok')
   } finally {
     world.cleanup()
   }
@@ -222,9 +223,9 @@ test('a failing sync never throws out of the turn-boundary listener', async () =
       host.emit('session/event', { header: { cwd: world.root } }, { type: 'turn/end', data: { turn: 1 } })
     })
 
-    const settled = await waitFor(() => host.state.status.areas.some(area => area.status === 'error'))
+    const settled = await waitFor(() => host.state.status.workspaces.some(area => area.status === 'error'))
     assert.ok(settled, 'the folder problem was reported')
-    assert.match(host.state.status.areas[0].detail, /不存在/u)
+    assert.match(host.state.status.workspaces[0].detail, /不存在/u)
     assert.equal(host.state.status.running, false, 'the run flag is cleared')
   } finally {
     world.cleanup()

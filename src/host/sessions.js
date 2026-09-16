@@ -537,6 +537,22 @@ export class SessionSync {
     this.state.save()
   }
 
+  /**
+   * Point bookkeeping at the configured file, loading it when it moves.
+   *
+   * The engine is constructed once per plugin row while the configuration can
+   * change at any time, so the state file is resolved on use rather than at
+   * construction; an unchanged path costs one string comparison.
+   *
+   * @param path - configured state file, or empty for the harness home default.
+   */
+  useState(path) {
+    const wanted = typeof path === 'string' && path.trim() !== '' ? path : defaultStatePath()
+    if (wanted === this.state.path) return
+    this.state.save()
+    this.state = new SessionState(wanted)
+  }
+
   /** Session ids this machine imported from another machine. */
   imports() {
     return this.state.imports()
@@ -547,12 +563,17 @@ export class SessionSync {
    * @param area - configured work area.
    * @param config - the resolved `sessions` configuration block.
    * @param signal - optional cancellation.
+   * @param options - `{ members }`: the session ids the Harness itself accounts
+   *   to this workspace, which is the authoritative membership. Sessions that
+   *   only match by working directory, or that this workspace imported earlier,
+   *   are unioned in so a continuation made here still travels.
    * @returns a summary `{ exported, unchanged, skipped, failed, notes }`.
    */
-  async exportArea(area, config, signal) {
+  async exportArea(area, config, signal, options = {}) {
     const summary = { exported: 0, unchanged: 0, skipped: 0, failed: 0, notes: [] }
     const persistence = this.persistence()
     if (persistence === undefined) return summary
+    const members = new Set(Array.isArray(options.members) ? options.members.map(String) : [])
     const dir = archiveDir(area.path, config?.dir)
     const compression = config?.compression === 'none' ? 'none' : 'zstd'
     if (compression === 'zstd' && !zstdAvailable()) {
@@ -575,15 +596,17 @@ export class SessionSync {
       const header = snapshot?.header
       if (header === undefined || header === null) continue
       const id = String(header.id)
-      // A subagent child is a session of this work area too, and it travels
-      // with its parent: the parent's history refers to it.
-      const inArea = sessionInArea(area.path, header.cwd, config?.includeDescendants !== false)
-      // A session this area imported keeps travelling with it even when the
-      // recorded working directory belongs to the machine it came from: without
-      // this, a continuation made here could never be published back.
+      // Three ways in, unioned on purpose:
+      //  - the Harness accounts the session to this workspace (`members`);
+      //  - its working directory is the workspace folder itself, or a
+      //    subdirectory when the operator asked for descendants;
+      //  - this workspace imported it earlier, so a continuation made on this
+      //    machine is published back even though the recorded cwd belongs to
+      //    the machine it came from.
+      const inArea = sessionInArea(area.path, header.cwd, config?.includeDescendants === true)
       const adopted = rememberedImports[id]?.areaId !== undefined
         && String(rememberedImports[id].areaId) === String(area.id)
-      if (!inArea && !adopted) continue
+      if (!inArea && !adopted && !members.has(id)) continue
       inScope.push({ header, revision: String(snapshot.revision ?? '') })
     }
 

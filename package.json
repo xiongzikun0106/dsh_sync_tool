@@ -2,7 +2,7 @@
   "name": "dsh-sync-tool",
   "version": "0.1.0",
   "private": true,
-  "description": "Per-turn git sync for user-chosen work areas, session records included: DSH Host plugin plus a Plugins-settings card in the web GUI",
+  "description": "Per-workspace git sync for the DSH web app: one remote per workspace folder, session records included",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",
@@ -35,7 +35,8 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings-plugins",
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
   }

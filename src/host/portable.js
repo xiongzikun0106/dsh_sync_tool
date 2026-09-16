@@ -17,20 +17,25 @@ export const MANIFEST_NAME = '.dsh-sync.json'
 export const MANIFEST_VERSION = 1
 
 /**
- * Project one area onto its portable manifest.
+ * Project one work area onto its portable manifest.
  * @param area - the configured work area.
  * @returns the machine-independent subset.
  */
 export function manifestFor(area) {
   return {
     version: MANIFEST_VERSION,
-    name: typeof area.name === 'string' ? area.name : '',
+    // Which sync shape wrote this manifest: a folder synced in place, or a
+    // work area whose archives are mirrored into a shared sessions repository.
+    mode: area.mode === 'sessions' ? 'sessions' : 'folder',
+    name: typeof area.title === 'string' && area.title !== ''
+      ? area.title
+      : (typeof area.name === 'string' ? area.name : ''),
     remote: typeof area.remote === 'string' ? area.remote : '',
     branch: typeof area.branch === 'string' && area.branch !== '' ? area.branch : 'main',
     direction: area.direction ?? 'both',
     autoCommit: area.autoCommit !== false,
     guardSensitive: area.guardSensitive !== false,
-    nestedRepos: area.nestedRepos ?? 'init',
+    nestedRepos: area.nestedRepos ?? 'refuse',
     extraIgnores: Array.isArray(area.extraIgnores) ? area.extraIgnores : [],
   }
 }
@@ -85,6 +90,7 @@ export function areaFromManifest(path, manifest, id) {
     id,
     name: typeof manifest.name === 'string' && manifest.name !== '' ? manifest.name : baseName(path),
     path,
+    mode: manifest.mode === 'sessions' ? 'sessions' : 'folder',
     remote: typeof manifest.remote === 'string' ? manifest.remote : '',
     branch: typeof manifest.branch === 'string' && manifest.branch !== '' ? manifest.branch : 'main',
     credentialRef: '',
@@ -93,6 +99,6 @@ export function areaFromManifest(path, manifest, id) {
     autoCommit: manifest.autoCommit !== false,
     extraIgnores: Array.isArray(manifest.extraIgnores) ? manifest.extraIgnores : [],
     guardSensitive: manifest.guardSensitive !== false,
-    nestedRepos: manifest.nestedRepos ?? 'init',
+    nestedRepos: manifest.nestedRepos ?? 'refuse',
   }
 }

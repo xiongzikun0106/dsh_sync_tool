@@ -28,19 +28,22 @@ test('config resolves the documented defaults', () => {
     commitMessageTemplate: 'dsh-sync: {host} {time} (turn {turn})',
     commitIdentity: { name: '', email: '' },
     historyLimit: 20,
+    sessionsRemote: '',
+    sessionsRoot: '',
     sessions: {
       enabled: true,
       dir: '.dsh-sessions',
       compression: 'zstd',
-      includeDescendants: true,
+      includeDescendants: false,
       maxSessions: 200,
       maxBytes: 0,
       cwdPolicy: 'keep',
       hintOnDeviceSwitch: true,
       statePath: '',
     },
+    workspaces: [],
+    request: { token: 0, path: '', kind: 'none', at: 0, areaId: '' },
     areas: [],
-    request: { token: 0, areaId: '', kind: 'none', at: 0 },
   })
 })
 
@@ -52,22 +55,28 @@ test('the session block merges field by field over its defaults', () => {
   assert.ok(Config({ sessions: { includeDescendants: false } }).sessions.enabled)
 })
 
-test('an area needs only id and path; the rest defaults', () => {
-  const [area] = Config({ areas: [{ id: 'a1', path: 'D:/work/plugins' }] }).areas
-  assert.deepEqual(area, {
-    id: 'a1',
-    name: '',
-    path: 'D:/work/plugins',
+test('a work area entry needs only a path; everything else defaults', () => {
+  assert.deepEqual(Config({ workspaces: [{ path: 'D:/work/myWeb' }] }).workspaces, [{
+    path: 'D:/work/myWeb',
+    title: '',
+    mode: 'auto',
     remote: '',
     branch: 'main',
     credentialRef: '',
     direction: 'both',
     enabled: true,
     autoCommit: true,
+    commitScope: 'all',
     extraIgnores: [],
     guardSensitive: true,
-    nestedRepos: 'init',
-  })
+    nestedRepos: 'refuse',
+  }])
+})
+
+test('the retired areas[] shape still validates, so an old document keeps loading', () => {
+  const [area] = Config({ areas: [{ id: 'a1', path: 'D:/work/plugins' }] }).areas
+  assert.equal(area.path, 'D:/work/plugins')
+  assert.equal(area.nestedRepos, 'init', 'the legacy default is preserved for migration')
 })
 
 test('the area status and direction vocabularies are closed', () => {
@@ -87,7 +96,7 @@ test('the area status and direction vocabularies are closed', () => {
 
 test('status defaults to an empty, not-running document', () => {
   assert.deepEqual(StatusConfig({}), {
-    revision: 0, running: false, updatedAt: 0, areas: [], history: [],
+    revision: 0, running: false, updatedAt: 0, workspaces: [], probes: [], history: [],
   })
 })
 
@@ -128,11 +137,11 @@ function stubContext() {
         scoped.settings = {
           installSection(owner, namespace, schema, entry, hooks) {
             sections.push({ owner, namespace, schema, entry, hooks })
-            hooks.setSource(() => ({ enabled: false, syncOnTurnEnd: false, debounceMs: 1, areas: [] }))
+            hooks.setSource(() => ({ enabled: false, syncOnTurnEnd: false, debounceMs: 1, workspaces: [] }))
             hooks.onChange()
           },
           register(namespace, schema, options) {
-            const value = { revision: 0, running: false, updatedAt: 0, areas: [], history: [] }
+            const value = { revision: 0, running: false, updatedAt: 0, workspaces: [], probes: [], history: [] }
             registered.push({ namespace, schema, options, value })
             return {
               get: () => value,
@@ -187,9 +196,10 @@ test('apply registers the config section and the status namespace', () => {
   assert.equal(registered[0].namespace, STATUS_NAMESPACE)
   assert.equal(registered[0].schema, StatusConfig)
   assert.ok(registered[0].options.base !== undefined, 'the status namespace declares a composition base')
-  // The initial publish ran: a valid status document with the configured areas.
+  // The initial publish ran: a valid status document with the configured work areas.
   assert.equal(registered[0].value.running, false)
-  assert.deepEqual(registered[0].value.areas, [])
+  assert.deepEqual(registered[0].value.workspaces, [])
+  assert.deepEqual(registered[0].value.probes, [])
 
   assert.equal(disposers.length, 2, 'the drain and the notice registration both live on the fiber')
   assert.equal(typeof disposers[0], 'function')
