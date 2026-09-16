@@ -465,7 +465,7 @@ turn/end
 3. **一个工作区一个仓库**：按我的理解实现（§2）。如果你其实想"填一次链接，所有工作区都同步到它"，
    告诉我，配置模型会不一样。
 
-## 11. 仍一项在核实（不影响上面结论）
+## 11b. 已核实完毕（保留结论）
 
 - `ui-workspace` 侧栏**工作区行右侧 `…` 菜单**是否有第三方插槽（有的话可作为第二个入口，
   从侧栏直接给某个工作区配同步）。正在核。
@@ -484,6 +484,36 @@ turn/end
 3. **不要用 `Workspace.path` 反推会话日志目录**：磁盘上的 `--<projectKey>--` 用的是**原始 cwd**、
    有损（分隔符折叠 + 251 字符截断），与 canonical 路径不是一一映射。
    我们的归档写在**工作区文件夹内部**，本来就不依赖它。
+
+## 13. 实现记录（2026-09）
+
+落地文件：
+- `src/host/contract.js`（新增）—— 配置/状态/probe/请求通道四个 schema，双边的唯一契约来源。
+- `src/host/workspaces.js`（新增）—— 旧 `areas[]` 迁移、按会话解析工作区、模式判定、按仓库分组、镜像路径。
+- `src/host/mirror.js`（新增）—— 镜像复制语义（进：镜像并删除多余；出：只合并不删除；
+  时间戳按毫秒比较并显式回写，否则两个平台的重复拷贝结果不一致）。
+- `src/host/git.js` —— 新增 `probe()`（只读探测，绝不 init）、`ensureLocalExclude()`
+  （写 `.git/info/exclude`，被 `git rev-parse --git-path` 解析，worktree/submodule 都对）、
+  提交支持 `commitPaths`（`git commit -- <paths>`，不碰用户已暂存的其它改动）；
+  `nestedRepos` 默认改 `refuse`。
+- `src/host/index.js` —— 按工作区跑 pass：模式 F 直接 `syncArea`；模式 S 按仓库分组，
+  在插件自己的镜像上跑同一套 git 序列，前后各做一次归档复制；探针与状态发布；
+  命令通道支持 `probe`/`sync`/`import`（`import` 退役为 probe 的别名）。
+- `src/client/index.js` —— 右上角按钮（`id: sync-tool-workspace`，`order: 200`）+ 锚定面板；
+  卡片降级为兜底入口与总览。
+- `package.json` —— 客户端 `inject` 增加 `@deepseek-ai/dsh-client-ui-workspace`
+  （工作区列表就是标准 props 的来源）。
+
+新增/更新的测试：`workspaces.test.mjs`、`mirror.test.mjs`、`mode-sessions.test.mjs`（两种模式的端到端）、
+`git-engine.test.mjs`（probe / commitPaths / 私有 exclude / 默认 refuse）、
+`client-card.test.mjs`（重写为面板与卡片）、以及既有套件的契约更新。
+
+验证：
+- Windows + Linux 全量 **102/102** 通过；真后端 E2E 两平台 **6/6** 通过。
+- WSL 里真实 `dsh web`：工作区（一个已有自己仓库与远端的真实项目文件夹）
+  在一次 pass 后 **HEAD 完全不变**、项目仓库无新提交、`.dsh-sessions/` 被私有 exclude 隐藏；
+  4 条会话归档出现在会话仓库的 `<工作区名>-<hash>/` 下；状态文档 `mode: sessions`、`status: ok`、会话计数递增；
+  探针 `kind: repo`、`remote: …/remote.git`（识别出项目自己的远端，但没有拿它当同步目标）。
 4. **不要复用别人的 slot id**（`open-in-app`、`session-log-download` 各占一个 id）；
    自己的按钮用新 id，`order: 200`。
 5. **不要碰 `header.corner`**：顶掉 ExpandButton 会让用户失去右侧栏开关。

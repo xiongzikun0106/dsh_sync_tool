@@ -74,15 +74,17 @@ function copyOne(source, target) {
 /**
  * Whether two files differ in size or modification time.
  *
- * Timestamps are compared at millisecond precision on purpose: `utimesSync`
- * carries a `Date`, while `mtimeMs` reports sub-millisecond precision, and
- * comparing the raw floats would make every copy look changed forever.
+ * The comparison uses the millisecond `Date` rather than the raw `mtimeMs`
+ * float, because that `Date` is exactly what `copyOne` writes: Node rounds the
+ * filesystem's sub-millisecond precision for the `Date` but keeps it in the
+ * float, so comparing the floats would report every freshly copied file as
+ * changed and re-copy the whole archive on every pass.
  */
 function differs(source, target) {
   try {
     const left = statSync(source)
     const right = statSync(target)
-    return left.size !== right.size || Math.trunc(left.mtimeMs) !== Math.trunc(right.mtimeMs)
+    return left.size !== right.size || left.mtime.getTime() !== right.mtime.getTime()
   } catch {
     return true
   }
